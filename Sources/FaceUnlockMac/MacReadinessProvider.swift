@@ -11,7 +11,10 @@ public struct MacReadinessProvider: ReadinessProviding {
         // Do not add placeholder implementations that return success.
         ReadinessReport(statuses: [
             .cameraPermission: cameraPermission,
-            .accessibilityPermission: AXIsProcessTrusted() ? .available : .permissionRequired
+            .accessibilityPermission: AXIsProcessTrusted() ? .available : .permissionRequired,
+            .lockSession: .diagnosticOnly,
+            .credentialVault: .diagnosticOnly,
+            .passwordEntry: .diagnosticOnly
         ])
     }
 

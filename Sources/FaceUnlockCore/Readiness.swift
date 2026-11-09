@@ -26,6 +26,7 @@ public enum ComponentStatus: String, Sendable {
     case permissionRequired = "Permission required"
     case unavailable = "Unavailable"
     case notImplemented = "Not implemented"
+    case diagnosticOnly = "Diagnostics only"
 }
 
 public struct ReadinessReport: Sendable {

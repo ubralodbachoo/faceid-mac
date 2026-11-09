@@ -20,7 +20,7 @@ final class ReadinessTests: XCTestCase {
         XCTAssertTrue(ReadinessReport(statuses: configured).isSetupComplete)
 
         for component in Component.allCases {
-            for status in [ComponentStatus.permissionRequired, .unavailable, .notImplemented] {
+            for status in [ComponentStatus.permissionRequired, .unavailable, .notImplemented, .diagnosticOnly] {
                 var statuses = configured
                 statuses[component] = status
                 XCTAssertFalse(ReadinessReport(statuses: statuses).isSetupComplete)
@@ -32,11 +32,14 @@ final class ReadinessTests: XCTestCase {
     }
 
     @MainActor
-    func testProductionSkeletonKeepsAuthenticationComponentsUnimplemented() {
+    func testProductionDoesNotAdvertiseUnvalidatedAuthenticationAsReady() {
         let report = MacReadinessProvider().inspect()
-        for component in [Component.credentialVault, .lockSession, .faceRecognition, .liveness, .passwordEntry] {
+        for component in [Component.faceRecognition, .liveness] {
             XCTAssertEqual(report.status(for: component), .notImplemented)
         }
+        XCTAssertEqual(report.status(for: .lockSession), .diagnosticOnly)
+        XCTAssertEqual(report.status(for: .credentialVault), .diagnosticOnly)
+        XCTAssertEqual(report.status(for: .passwordEntry), .diagnosticOnly)
         XCTAssertFalse(report.isSetupComplete)
     }
 }

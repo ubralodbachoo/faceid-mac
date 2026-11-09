@@ -1,12 +1,20 @@
 # Face Unlock for Mac — functional-first project plan
 
-Functional-first plan · November 9, 2026 · step 1 skeleton implemented; unlock functionality remains unimplemented.
+Functional-first plan · November 9, 2026 · First one-shot password unlock reported successful; remaining Milestone 1 hardware acceptance is pending.
 
 ## Current increment
 
 The owner authorized starting a new skeleton after the planning reset. The active Swift package now contains core setup requirements, a read-only macOS permission adapter, a minimal diagnostic app, tests, and a development app build script. The previous prototype remains archived. See [architecture notes](docs/ARCHITECTURE.md).
 
-Next: read-only lock/account observation for Milestone 1. Credential storage and password submission are later increments; UI design remains deferred.
+Step 2 adds read-only console/process/session account comparison, reported lock-state inspection, monotonic freshness checks, lifecycle invalidation, an in-memory change history, and a one-shot diagnostic CLI. Account matching was observed on the development Mac; the lock flag was absent and correctly shown as unknown. The user subsequently captured unknown → locked → unknown during a real lock cycle. Sleep/wake and fast-user-switch transitions remain unverified. See [validation notes](docs/SESSION_OBSERVATION.md).
+
+The owner then requested the rest of Milestone 1. Implemented: AES-256-GCM credential storage, an app-specific development Keychain key, macOS-authenticated 90-second in-memory sessions measured including sleep, authenticated replacement/deletion, a 60-second one-shot manual attempt, Apple loginwindow secure-field checks, PID-directed input, cancellation/revocation, optional one-frame locked-camera probing, and an in-memory test report. The app distinguishes submitted events from a user-confirmed desktop return. No face match is connected.
+
+Status: the main lock-screen mechanism has its first successful live result, reported by the user. Accessibility trust was repaired by exact-app re-registration. A controlled observation-only test verified the locked account and Apple loginwindow secure field at 16:11:30. The user privately saved the encrypted password and completed macOS authentication. An expired 90-second lease prevented initial arming; reauthorization succeeded without entering or saving the password again. The agent armed exactly one submission at 16:18:36 and locked the Mac. The app recorded submission to the verified loginwindow PID at 16:18:44 and revoked the credential session. The user's latest clarification states that the Mac returned to the desktop automatically, superseding an earlier fallback selection. This is user-reported confirmation, not independent programmatic attribution.
+
+**Milestone 1 is not fully accepted yet**: repeat sleep/wake, camera availability while locked, wrong/changed password fallback, permission loss, account switching, and real restart/deletion checks remain. No second password attempt is armed or authorized by this result. Face recognition is not connected. No source/binary/signature change was made during these live tests. See [Milestone 1 evidence and acceptance matrix](docs/MILESTONE_1.md).
+
+The development vault uses the file-based login Keychain with a creator-app ACL and an app-enforced LocalAuthentication gate. It does not claim hardware-enforced userPresence or Secure Enclave protection. The distribution Keychain design remains a separate required release task.
 
 ## Product outcome
 
@@ -30,7 +38,7 @@ After local identity verification and required liveness checks, an authorized us
 
 Define and validate the Keychain/session policy, including system authentication to authorize access, session expiry, credential replacement/deletion, and behavior while the Mac is locked. Reliable lock/account/focus checks must precede any credential submission. Webcam spoofing and recoverable-credential exposure remain product limitations; do not market this as Apple's Face ID.
 
-The first functional proof is a controlled, manually triggered lock-screen password submission on the declared test Mac, before connecting biometric automation. Use minimal native controls. Selecting the architecture does not start implementation or reactivate the archived prototype.
+The first functional proof is a controlled, manually triggered lock-screen password submission on the declared test Mac, before connecting biometric automation. Use minimal native controls. The owner has authorized implementing this manual test. The archived prototype remains inactive.
 
 Acceptance evidence:
 
