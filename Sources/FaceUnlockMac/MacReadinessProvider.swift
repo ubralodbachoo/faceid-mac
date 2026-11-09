@@ -14,7 +14,8 @@ public struct MacReadinessProvider: ReadinessProviding {
             .accessibilityPermission: AXIsProcessTrusted() ? .available : .permissionRequired,
             .lockSession: .diagnosticOnly,
             .credentialVault: .diagnosticOnly,
-            .passwordEntry: .diagnosticOnly
+            .passwordEntry: .diagnosticOnly,
+            .faceRecognition: .diagnosticOnly
         ])
     }
 

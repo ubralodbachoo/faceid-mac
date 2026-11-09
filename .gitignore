@@ -4,3 +4,9 @@ archive/
 build/
 .DS_Store
 *.xcuserstate
+.cache/
+.tools/
+.venv-models/
+Models/ArcFace.mlpackage/
+Models/reference/
+Models/validation.json

@@ -34,12 +34,13 @@ final class ReadinessTests: XCTestCase {
     @MainActor
     func testProductionDoesNotAdvertiseUnvalidatedAuthenticationAsReady() {
         let report = MacReadinessProvider().inspect()
-        for component in [Component.faceRecognition, .liveness] {
+        for component in [Component.liveness] {
             XCTAssertEqual(report.status(for: component), .notImplemented)
         }
         XCTAssertEqual(report.status(for: .lockSession), .diagnosticOnly)
         XCTAssertEqual(report.status(for: .credentialVault), .diagnosticOnly)
         XCTAssertEqual(report.status(for: .passwordEntry), .diagnosticOnly)
+        XCTAssertEqual(report.status(for: .faceRecognition), .diagnosticOnly)
         XCTAssertFalse(report.isSetupComplete)
     }
 }

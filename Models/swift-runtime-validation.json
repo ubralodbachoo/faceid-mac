@@ -1,0 +1,11 @@
+{
+  "computeUnits" : "all (Core ML chooses CPU\/GPU\/Neural Engine)",
+  "dimensions" : 512,
+  "loadMilliseconds" : 885.3691249969415,
+  "measuredPredictions" : 30,
+  "medianMilliseconds" : 0.8872916660038754,
+  "minimumReferenceCosine" : 0.9999830592174515,
+  "modelIdentifier" : "insightface-w600k_mbf-glance-b97f5213-fp16-v1",
+  "p95Milliseconds" : 0.9797916718525812,
+  "referenceCases" : 5
+}

@@ -8,9 +8,9 @@ struct StatusView: View {
     var body: some View {
         ScrollView {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Face Unlock — Milestone 1 test")
+            Text("Face Unlock — functional development")
                 .font(.headline)
-            Text("Face recognition is not connected. Password entry requires an explicitly armed one-shot test.")
+            Text("ArcFace diagnostics are separate from the manually armed password-entry test.")
                 .foregroundStyle(.secondary)
 
             Grid(alignment: .leading, horizontalSpacing: 32, verticalSpacing: 12) {
@@ -25,6 +25,8 @@ struct StatusView: View {
 
             Text("\(model.report.blockers.count) setup requirements remaining")
                 .font(.callout)
+            Divider()
+            RecognitionTestView(model: model.recognition)
             Divider()
             CredentialTestView(vault: model.vault, controller: model.manualTest)
             Divider()

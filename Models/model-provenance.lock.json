@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "model": "w600k_mbf",
+  "backbone": "MobileFaceNet",
+  "embedding_dimensions": 512,
+  "glance_commit": "b97f521397ec1197ba17768ba797cae1e628848d",
+  "files": [
+    {
+      "path": "ArcFace.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+      "url": "https://raw.githubusercontent.com/jonnyoo/glance/b97f521397ec1197ba17768ba797cae1e628848d/glance/Models/ArcFace.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+      "sha256": "858f0f0f3bf3766ce41e39f2c26c86bab47b84100e7eaecf4c5ef87b3b3fad3a",
+      "git_blob_sha1": "21ed1bafc70ccef70323b017c96aa3ab82dfd9c9",
+      "bytes": 84837
+    },
+    {
+      "path": "ArcFace.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+      "url": "https://raw.githubusercontent.com/jonnyoo/glance/b97f521397ec1197ba17768ba797cae1e628848d/glance/Models/ArcFace.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+      "sha256": "994e849b8fd0d44dbb33b4aac42d1e0b49b8410ede0f9d32b93ae5d827ed6e68",
+      "git_blob_sha1": "19bd7f571f7af2e026f2eedac60f3982aa8525ec",
+      "bytes": 6825280
+    },
+    {
+      "path": "ArcFace.mlpackage/Manifest.json",
+      "url": "https://raw.githubusercontent.com/jonnyoo/glance/b97f521397ec1197ba17768ba797cae1e628848d/glance/Models/ArcFace.mlpackage/Manifest.json",
+      "sha256": "71e885c0407c5dcaede0bd4d4abcba2e9dea8fb377ed57d1fddcbcad906fe894",
+      "git_blob_sha1": "d0b274e4bf7980a734ec95c43982c9a51125622d",
+      "bytes": 617
+    }
+  ],
+  "reference": {
+    "url": "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_s.zip",
+    "archive_sha256": "d85a87f503f691807cd8bb97128bdf7a0660326cd9cd02657127fa978bab8b5e",
+    "member": "w600k_mbf.onnx",
+    "sha256": "9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f",
+    "bytes": 13616099
+  },
+  "license": "InsightFace pretrained weights: non-commercial research only; commercial rights unresolved.",
+  "reference_fixture_sha256": "7df7059c4a6ccb73165ae6b4b9844ba55971be4bc07ab931105ab100e9c42eeb"
+}

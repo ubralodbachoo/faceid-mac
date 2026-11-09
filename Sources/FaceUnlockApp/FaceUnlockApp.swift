@@ -11,7 +11,7 @@ struct FaceUnlockApp: App {
     var body: some Scene {
         WindowGroup("Face Unlock — Development") {
             StatusView(model: model)
-                .onAppear { delegate.onTermination = { model.manualTest.cancel() } }
+                .onAppear { delegate.onTermination = { model.manualTest.cancel(); model.recognition.cancel() } }
         }
         .windowResizability(.contentSize)
     }
@@ -30,6 +30,7 @@ final class AppModel: ObservableObject {
     let sessionMonitor = MacSessionMonitor()
     let vault = CredentialVault()
     let manualTest: ManualUnlockController
+    let recognition = RecognitionTestModel()
 
     init(provider: any ReadinessProviding) {
         self.provider = provider

@@ -6,22 +6,25 @@ let package = Package(
     platforms: [.macOS(.v15)],
     products: [
         .executable(name: "FaceUnlock", targets: ["FaceUnlockApp"]),
-        .executable(name: "FaceUnlockDiagnostics", targets: ["FaceUnlockDiagnostics"])
+        .executable(name: "FaceUnlockDiagnostics", targets: ["FaceUnlockDiagnostics"]),
+        .executable(name: "FaceRecognitionDiagnostics", targets: ["FaceRecognitionDiagnostics"])
     ],
     targets: [
         .target(name: "FaceUnlockCore"),
         .target(name: "FaceUnlockMac", dependencies: ["FaceUnlockCore"]),
+        .target(name: "FaceUnlockRecognition", dependencies: ["FaceUnlockCore"]),
         .executableTarget(
             name: "FaceUnlockApp",
-            dependencies: ["FaceUnlockCore", "FaceUnlockMac"]
+            dependencies: ["FaceUnlockCore", "FaceUnlockMac", "FaceUnlockRecognition"]
         ),
         .executableTarget(
             name: "FaceUnlockDiagnostics",
             dependencies: ["FaceUnlockCore", "FaceUnlockMac"]
         ),
+        .executableTarget(name: "FaceRecognitionDiagnostics", dependencies: ["FaceUnlockRecognition"]),
         .testTarget(
             name: "FaceUnlockCoreTests",
-            dependencies: ["FaceUnlockCore", "FaceUnlockMac"]
+            dependencies: ["FaceUnlockCore", "FaceUnlockMac", "FaceUnlockRecognition"]
         )
     ],
     swiftLanguageModes: [.v6]

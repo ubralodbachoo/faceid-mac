@@ -1,6 +1,6 @@
 # Face Unlock for Mac — functional-first project plan
 
-Functional-first plan · November 9, 2026 · First one-shot password unlock reported successful; remaining Milestone 1 hardware acceptance is pending.
+Functional-first plan · updated November 10, 2026 · Milestone 2 model engineering validated; commercial model rights and remaining Milestone 1 hardware acceptance are pending.
 
 ## Current increment
 
@@ -15,6 +15,17 @@ Status: the main lock-screen mechanism has its first successful live result, rep
 **Milestone 1 is not fully accepted yet**: repeat sleep/wake, camera availability while locked, wrong/changed password fallback, permission loss, account switching, and real restart/deletion checks remain. No second password attempt is armed or authorized by this result. Face recognition is not connected. No source/binary/signature change was made during these live tests. See [Milestone 1 evidence and acceptance matrix](docs/MILESTONE_1.md).
 
 The development vault uses the file-based login Keychain with a creator-app ACL and an app-enforced LocalAuthentication gate. It does not claim hardware-enforced userPresence or Secure Enclave protection. The distribution Keychain design remains a separate required release task.
+
+
+## Milestone 2 implementation status
+
+At the owner's request, development proceeded to isolated model integration after the first positive Milestone 1 result; the remaining Milestone 1 tests have not been waived or marked complete.
+
+Implemented: InsightFace `w600k_mbf` / MobileFaceNet trained with ArcFace, using the Core ML package pinned to Glance commit `b97f521397ec1197ba17768ba797cae1e628848d`. Original ONNX and converted-package hashes are recorded. Five deterministic synthetic comparisons against official ONNX passed. The compiled Swift `.all` runtime also passed against the reference vectors, with minimum cosine approximately 0.999983; one 30-run warm benchmark measured about 0.887 ms median and 0.980 ms p95 for embedding inference only. The actor-confined inference module includes Vision single-face detection, required five-point alignment, RGB pixel handling, 512-float normalization, and model-version-aware comparison helpers. Missing/bad models and failed validation cannot generate an accepted descriptor.
+
+The version 0.3.0 app provides synthetic model diagnostics and a local-image analyzer. Its packaged-model self-test passed in the native app, and a synthetic image without a face was correctly rejected. The native regression suite passed 32 tests with one opt-in Keychain test skipped. No enrollment, persisted face descriptor, liveness, recognition threshold, automatic camera scan, or face-triggered password entry was added. The recognition module does not depend on the credential/input module. This preserves the functional-first scope without enabling biometric authentication prematurely.
+
+**Milestone 2 is not commercially cleared:** InsightFace's pretrained weights are restricted to noncommercial research. Choosing the same weights as Glance does not grant commercial rights. Local research integration is ready; the distributable-model acceptance gate stays open until suitable rights are obtained. Real-user accuracy, camera integration and enrollment are subsequent milestones. See [Milestone 2 evidence](docs/MILESTONE_2.md).
 
 ## Product outcome
 
