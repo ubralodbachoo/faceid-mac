@@ -21,7 +21,7 @@ The app constructs the macOS readiness provider and passes it into its model. Th
 - Session diagnostics, the development credential vault, and the manual password-entry harness are implemented. Live input/account checks remain diagnostic-only until hardware acceptance passes. ArcFace model inference is implemented in an isolated module. Enrolled identity verification and liveness are unimplemented. See [session observation notes](SESSION_OBSERVATION.md) and [Milestone 1 runbook](MILESTONE_1.md).
 - `isSetupComplete` is a configuration diagnostic. It must never authorize a credential read or password submission. Those need fresh per-attempt checks in the future coordinator.
 - The development view has explicitly armed observation-only and one-shot submission tests. There is no automatic unlock switch or simulated success animation.
-- Credentials persist only as AES-GCM ciphertext with a separate development Keychain key. There is no auto-start item, background helper, or biometric storage. A pinned research-use face model is bundled locally after verification.
+- Credentials persist only as AES-GCM ciphertext with a separate development Keychain key. Biometric descriptors now persist in a separate encrypted enrollment vault. There is no auto-start item or background helper. A pinned research-use face model is bundled locally after verification.
 
 ## Next implementation increments
 
@@ -60,4 +60,22 @@ No changes to authorization policies, SIP, FileVault, system credentials, or the
 
 `FaceEmbedding` validates dimensions/finiteness/nonzero norm, L2-normalizes, and rejects comparisons between different model IDs. Its printable descriptions redact vector values. A cosine score is not an identity probability, liveness result, or authentication permit.
 
-`RecognitionTestModel` publishes aggregate diagnostics only; it does not retain an image or embedding, read a credential, request camera permission, or call `ManualUnlockController`. Enrollment and automatic camera processing are later work. Model weights, their license limits and numerical test evidence are documented in [Milestone 2](MILESTONE_2.md).
+`RecognitionTestModel` publishes aggregate diagnostics only; it does not retain an image or embedding, read a credential, request camera permission, or call `ManualUnlockController`. Explicitly started camera enrollment is now implemented separately; automatic verification remains later work. Model weights, their license limits and numerical test evidence are documented in [Milestone 2](MILESTONE_2.md).
+
+## Enrollment boundary (Milestone 3)
+
+`EnrollmentDraft` owns the seven-step pose/light collection policy. `EnrollmentCamera` owns bounded video-only capture and yields transient frames to the same actor-confined `ArcFaceRecognizer.analyze` path as image diagnostics. `EnrollmentModel` coordinates OS-authenticated capture, cancellation, progress and explicit commit; it never references the credential vault or manual-input controller. The recognition module still has no dependency on the macOS credential/input target.
+
+`EnrollmentVault` owns a separate Keychain service/file, schema/UID/model validation and AES-GCM storage. It reuses the private atomic-file and development Keychain adapters with distinct parameters. New enrollment/replacement and deletion use fresh system authentication. Capture leases last at most 180 continuous seconds; explicit template-read leases last at most 90 seconds and cannot mutate enrollment. Startup has no lease. No face template authorizes password access or input. Real-camera acceptance and calibrated identity/liveness gates remain pending; see [Milestone 3](MILESTONE_3.md).
+
+The 0.5.0 app defaults to guided enrollment, with developer tools in a separate tab. `EnrollmentCaptureServices.live` always validates the real bundled model before camera access; injectable boundaries are used only by synthetic workflow tests. `EnrollmentModel` publishes a single transient preview and explicit UI phases, clears the preview on all termination paths, and never saves camera images. Preview is up to 12 Hz, analysis at most 2 Hz, and accepted samples at least 1.5 seconds apart. The preview mirrors display only, leaving recognition input unmirrored.
+
+Version 0.5.1 adds explicit revision-3 face pose detection on a fresh `VNImageRequestHandler`. Reusing the landmark handler returned cached revision-2 observations without pitch on the target Mac. The pose pass runs after the existing landmark alignment/render work and must agree spatially with its single detected face. Missing pose/quality produces explicit feedback, never fabricated angles. Native public-photo tests cover real metadata and Core ML analysis in addition to synthetic app-flow tests.
+
+Version 0.5.2 uses shared `EnrollmentFraming` geometry for the ellipse and the actual pose-detector center, plus `EnrollmentPreviewGeometry` for aspect-fit letterboxing and display mirroring. Transient face bounds are never persisted. Foreground loss now closes the current camera/stream segment and enters a paused phase; the local draft survives only within the original lease. Explicit Continue creates a new camera/stream without reauthorization or lease extension. The watchdog continues account/lock/expiry checks while paused/reviewing. Foreground is still required to process camera frames and commit enrollment. Lock/sleep/account changes or cancel clear the draft; returning focus alone cannot restart capture.
+
+## Continuous video enrollment (0.6.0)
+
+The production enrollment coordinator now uses `VideoEnrollmentCollector`, with exponentially smoothed pose/bounds, stable windows of distinct observations, separated quality-ranked descriptor selection, and nine relative directions. Native `AVCaptureVideoPreviewLayer` rendering runs independently of actor-confined inference. A bounded downscaled analysis stream runs at up to 10 Hz; no video writer or microphone exists. Explicit revision-3 detection feeds both landmarks and quality, preventing implicit legacy/cache ambiguity.
+
+Template schema 2 binds the current recognition pipeline and temporal collection policy and stores 18 descriptors. Old seven-view templates cannot become current verification templates by reinterpretation; authenticated replacement preserves them until a fresh complete scan is saved. The former `EnrollmentDraft` is retained for legacy compatibility tests only. Account/lock/authentication/expiry, pause/resume, and manual password boundaries remain in place. See [the current runbook and validation](CONTINUOUS_ENROLLMENT.md).

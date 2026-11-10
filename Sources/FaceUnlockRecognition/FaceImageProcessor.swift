@@ -5,18 +5,68 @@ import Vision
 import FaceUnlockCore
 
 enum FaceImageProcessor {
-    static func prepare(_ image: CGImage, context: CIContext) throws -> (pixels: CVPixelBuffer, quality: Float?) {
-        let request = VNDetectFaceLandmarksRequest()
+    static func prepare(_ image: CGImage, context: CIContext) throws -> (pixels: CVPixelBuffer, quality: Float?, metrics: EnrollmentMetrics) {
         let handler = VNImageRequestHandler(cgImage: image, orientation: .up)
-        try handler.perform([request])
+        // Detect with revision 3 FIRST. Supplying that exact face to both following requests
+        // avoids implicit legacy detection/cache reuse and keeps pose, quality and landmarks together.
+        let detection = VNDetectFaceRectanglesRequest()
+        detection.revision = VNDetectFaceRectanglesRequestRevision3
+        try handler.perform([detection])
+        let poseFace = try selectFace(detection.results ?? [])
+        let request = VNDetectFaceLandmarksRequest()
+        request.revision = VNDetectFaceLandmarksRequestRevision3
+        request.inputFaceObservations = [poseFace]
+        let quality = VNDetectFaceCaptureQualityRequest()
+        quality.revision = VNDetectFaceCaptureQualityRequestRevision3
+        quality.inputFaceObservations = [poseFace]
+        try handler.perform([request, quality])
         let face = try selectFace(request.results ?? [])
         let points = try landmarks(face, width: image.width, height: image.height)
         let transform = try FaceAlignmentTransform.fit(source: points)
         let pixels = try render(image, transform: transform, context: context)
-        let quality = VNDetectFaceCaptureQualityRequest()
-        quality.inputFaceObservations = [face]
-        try handler.perform([quality])
-        return (pixels, quality.results?.first?.faceCaptureQuality)
+        let score = quality.results?.first?.faceCaptureQuality
+        let metrics = try captureMetrics(face: face, poseFace: poseFace, quality: score,
+                                         width: image.width, height: image.height, luminance: luminance(pixels))
+        return (pixels, score, metrics)
+    }
+
+    static func captureMetrics(face: VNFaceObservation, poseFace: VNFaceObservation, quality: Float?,
+                               width: Int, height: Int, luminance: Double) throws -> EnrollmentMetrics {
+        guard let yaw = poseFace.yaw, let pitch = poseFace.pitch, let roll = poseFace.roll,
+              sameFaceRegion(face.boundingBox, poseFace.boundingBox) else { throw RecognitionError.poseUnavailable }
+        guard let quality else { throw RecognitionError.captureQualityUnavailable }
+        // Use the current pose detector for framing, rather than the legacy landmark detector's
+        // padded rectangle. Alignment still uses its original landmarks above.
+        let box = poseFace.boundingBox
+        let bounds = FaceBounds(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
+        return EnrollmentMetrics(quality: Double(quality), yaw: yaw.doubleValue, pitch: pitch.doubleValue,
+            roll: roll.doubleValue, faceWidthPixels: box.width * Double(width),
+            faceHeightPixels: box.height * Double(height),
+            centered: EnrollmentFraming.isCentered(bounds, imageWidth: width, imageHeight: height),
+            luminance: luminance, faceBounds: bounds)
+    }
+
+    static func sameFaceRegion(_ first: CGRect, _ second: CGRect) -> Bool {
+        let intersection = first.intersection(second)
+        let sharedArea = intersection.isNull ? 0 : intersection.width * intersection.height
+        let union = first.width * first.height + second.width * second.height - sharedArea
+        return sharedArea.isFinite && union.isFinite && union > 0 && sharedArea / union >= 0.4
+    }
+
+    private static func luminance(_ buffer: CVPixelBuffer) throws -> Double {
+        guard CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess else { throw RecognitionError.pixels }
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer)?.assumingMemoryBound(to: UInt8.self) else { throw RecognitionError.pixels }
+        let stride = CVPixelBufferGetBytesPerRow(buffer)
+        var sum = 0.0
+        // Central aligned-face region; no per-pixel data leaves this function.
+        for y in 24..<88 {
+            for x in 24..<88 {
+                let offset = y * stride + x * 4
+                sum += 0.2126 * Double(base[offset + 2]) + 0.7152 * Double(base[offset + 1]) + 0.0722 * Double(base[offset])
+            }
+        }
+        return sum / (64 * 64)
     }
 
     static func selectFace(_ faces: [VNFaceObservation]) throws -> VNFaceObservation {

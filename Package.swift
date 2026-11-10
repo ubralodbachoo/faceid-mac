@@ -24,7 +24,8 @@ let package = Package(
         .executableTarget(name: "FaceRecognitionDiagnostics", dependencies: ["FaceUnlockRecognition"]),
         .testTarget(
             name: "FaceUnlockCoreTests",
-            dependencies: ["FaceUnlockCore", "FaceUnlockMac", "FaceUnlockRecognition"]
+            dependencies: ["FaceUnlockCore", "FaceUnlockMac", "FaceUnlockRecognition", "FaceUnlockApp"],
+            resources: [.copy("Fixtures")]
         )
     ],
     swiftLanguageModes: [.v6]

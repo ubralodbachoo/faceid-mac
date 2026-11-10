@@ -1,6 +1,6 @@
 # Face Unlock for Mac — functional-first project plan
 
-Functional-first plan · updated November 10, 2026 · Milestone 2 model engineering validated; commercial model rights and remaining Milestone 1 hardware acceptance are pending.
+Functional-first plan · updated November 10, 2026 · Milestone 3 live enrollment/Save confirmed; restart/lifecycle acceptance, commercial model rights and remaining Milestone 1 hardware acceptance are pending.
 
 ## Current increment
 
@@ -26,6 +26,20 @@ Implemented: InsightFace `w600k_mbf` / MobileFaceNet trained with ArcFace, using
 The version 0.3.0 app provides synthetic model diagnostics and a local-image analyzer. Its packaged-model self-test passed in the native app, and a synthetic image without a face was correctly rejected. The native regression suite passed 32 tests with one opt-in Keychain test skipped. No enrollment, persisted face descriptor, liveness, recognition threshold, automatic camera scan, or face-triggered password entry was added. The recognition module does not depend on the credential/input module. This preserves the functional-first scope without enabling biometric authentication prematurely.
 
 **Milestone 2 is not commercially cleared:** InsightFace's pretrained weights are restricted to noncommercial research. Choosing the same weights as Glance does not grant commercial rights. Local research integration is ready; the distributable-model acceptance gate stays open until suitable rights are obtained. Real-user accuracy, camera integration and enrollment are subsequent milestones. See [Milestone 2 evidence](docs/MILESTONE_2.md).
+
+## Milestone 3 implementation status
+
+At the owner's request, the 0.4.0 development app now adds guided local camera enrollment and a separate encrypted template vault. Seven samples cover frontal/opposite yaw/opposite pitch and two light variations, with single-face, pose, size and quality checks. Camera and selected-image analysis share the same validated Vision/alignment/ArcFace pipeline. Captures stay in memory; an explicit Save commits seven descriptors with authenticated schema/account/model binding. Enrollment/replacement and deletion require fresh macOS authentication. Biometric capture authorization expires after three minutes; a separate read-only template lease expires after 90 seconds. Neither grants credential access or input permission.
+
+Native synthetic tests cover file persistence across vault/store recreation, replacement/deletion, cancellation and failed writes preserving the original, account/model mismatches, corrupt payloads, missing/unavailable keys, and expiry/revocation. Disposable real-Keychain template storage and the existing compiled-model validation pass. **Real-person seven-step enrollment, app-restart validation, and camera/lifecycle failure acceptance remain pending.** Identity thresholds, liveness and automatic unlock are not enabled. See [Milestone 3 implementation and live runbook](docs/MILESTONE_3.md).
+
+The owner subsequently requested a simple usable enrollment UI because blind diagnostic controls made registration difficult. Version 0.5.0 makes guided face setup the default, with a mirrored local preview, oval framing guide, individual pose/light instructions, seven-view progress and explicit Save. Developer/password controls move to a separate tab. The native suite passes 59 tests, including synthetic app-flow tests for preview lifecycle, cancellation, late results and explicit saving. This functional enrollment UX work does not mark Milestone 7 or the real-camera acceptance gates complete.
+
+Version 0.5.1 corrects a live enrollment blocker: the implicit landmark detector and its cached observations omitted pitch, so every frame was rejected at 0/7. A fresh image handler with explicit revision-3 pose detection now supplies the required angles, while retaining the existing landmark alignment/render path. A public-photo regression reproduced the original failure and now passes through native Vision and the real Core ML model. Missing metadata and chin-position feedback are explicit. The native suite passes 64 tests; owner-camera acceptance still requires retry.
+
+The owner's live 0.5.1 attempt advanced to 1/7, then reported framing trouble; full enrollment remains unaccepted. Version 0.5.2 adds a visible detected-face box and shared aspect-fit/mirrored guide geometry, separates clipping from centering feedback, and pauses with the camera off when switching apps. Explicit Continue resumes the partial scan only within its original lease; lock/sleep/account changes still revoke it. The native suite passes 74 tests including pause/resume, expiry/account protection, and framing geometry.
+
+At the owner's request, version 0.6.0 replaces the seven-view collector with continuous multi-frame enrollment: native live preview, a directional ring, natural-angle calibration, stable temporal windows and two selected samples for each of nine poses. No manual lighting changes or video recording file is required. New encrypted schema-2 templates bind the preprocessing pipeline and collection policy; old templates require fresh enrollment and remain preserved until explicit replacement Save. The native suite passes 83 tests, including replay of the provided reference-video segment through actual Vision/Core ML (two angles captured). On November 10, the owner completed the live scan and reported successful Save; text-only UI inspection confirmed registered status and valid saved data. Quit/relaunch validation and remaining lifecycle acceptance are pending; see [continuous enrollment](docs/CONTINUOUS_ENROLLMENT.md).
 
 ## Product outcome
 

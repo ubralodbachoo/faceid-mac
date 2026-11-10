@@ -17,6 +17,7 @@ public enum ArcFaceContract {
 
 public enum RecognitionError: Error, LocalizedError {
     case missingModel, contract, reference, prediction, pixels, image, noFace, multipleFaces, landmarks
+    case poseUnavailable, captureQualityUnavailable
     public var errorDescription: String? {
         switch self {
         case .missingModel: "ArcFace is missing. Fetch, validate and compile the pinned model before testing."
@@ -28,6 +29,8 @@ public enum RecognitionError: Error, LocalizedError {
         case .noFace: "No face was detected."
         case .multipleFaces: "Exactly one face is required. Multiple faces were detected."
         case .landmarks: "Five usable landmarks were not found. A loose crop will not be used."
+        case .poseUnavailable: "The camera detected your face but could not measure its angle. Face the camera and try a small head movement."
+        case .captureQualityUnavailable: "The camera detected your face but could not measure capture quality. Try even light and keep your face visible."
         }
     }
 }
@@ -48,6 +51,7 @@ public struct FaceAnalysis: Sendable {
     public let embedding: FaceEmbedding
     public let quality: Float?
     public let inferenceMilliseconds: Double
+    public let enrollmentMetrics: EnrollmentMetrics?
 }
 
 /// No dependency on credential storage or password submission. The model is actor-confined.
@@ -134,11 +138,19 @@ public actor ArcFaceRecognizer {
                 kCGImageSourceThumbnailMaxPixelSize: 2048,
                 kCGImageSourceShouldCacheImmediately: true
               ] as CFDictionary) else { throw RecognitionError.image }
+        return try analyze(image)
+    }
+
+    /// Camera and selected-image analysis share exactly the same detection/alignment/model path.
+    public func analyze(_ image: CGImage) throws -> FaceAnalysis {
+        guard validated else { throw RecognitionError.reference }
+        try Task.checkCancellation()
         let prepared = try FaceImageProcessor.prepare(image, context: context)
         let start = ProcessInfo.processInfo.systemUptime
         let embedding = try predict(prepared.pixels, model: load())
         return FaceAnalysis(embedding: embedding, quality: prepared.quality,
-                            inferenceMilliseconds: (ProcessInfo.processInfo.systemUptime - start) * 1000)
+                            inferenceMilliseconds: (ProcessInfo.processInfo.systemUptime - start) * 1000,
+                            enrollmentMetrics: prepared.metrics)
     }
 
     private func predict(_ pixels: CVPixelBuffer, model: MLModel) throws -> FaceEmbedding {

@@ -4,15 +4,45 @@ import FaceUnlockMac
 
 struct StatusView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject private var enrollment: EnrollmentModel
+    @State private var showsDiagnostics = false
+
+    init(model: AppModel) {
+        self.model = model
+        self.enrollment = model.enrollment
+    }
 
     var body: some View {
-        ScrollView {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Face Unlock — functional development")
-                .font(.headline)
-            Text("ArcFace diagnostics are separate from the manually armed password-entry test.")
-                .foregroundStyle(.secondary)
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                Label("Face Unlock", systemImage: "faceid").font(.headline)
+                Spacer()
+                Picker("View", selection: $showsDiagnostics) {
+                    Text("Face setup").tag(false)
+                    Text("Developer tools").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 260)
+                .disabled(enrollment.isBusy || enrollment.canSave)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+            Divider()
+            ScrollView {
+                if showsDiagnostics { diagnostics }
+                else { EnrollmentView(model: enrollment) }
+            }
+        }
+        .frame(width: 640, height: 780)
+        .onDisappear { enrollment.cancel() }
+    }
 
+    private var diagnostics: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Developer tools").font(.title2.weight(.semibold))
+            Text("Model diagnostics and manual password tests are separate from face registration.")
+                .font(.callout).foregroundStyle(.secondary)
             Grid(alignment: .leading, horizontalSpacing: 32, verticalSpacing: 12) {
                 ForEach(Component.allCases, id: \.self) { component in
                     GridRow {
@@ -22,9 +52,6 @@ struct StatusView: View {
                     }
                 }
             }
-
-            Text("\(model.report.blockers.count) setup requirements remaining")
-                .font(.callout)
             Divider()
             RecognitionTestView(model: model.recognition)
             Divider()
@@ -34,9 +61,6 @@ struct StatusView: View {
             Button("Refresh status", action: model.refresh)
         }
         .padding(24)
-        .frame(width: 620)
-        }
-        .frame(height: 780)
     }
 }
 

@@ -1,8 +1,8 @@
 # Face Unlock for Mac
 
-Functional-first development: Glance’s ArcFace model is integrated for isolated Milestone 2 diagnostics. The first manual password unlock was reported successful; remaining Milestone 1 acceptance is tracked separately.
+Functional-first development: Milestone 3 now uses continuous video enrollment and encrypted face-template storage with the pinned ArcFace model. The first manual password unlock was reported successful; remaining Milestone 1 acceptance is tracked separately.
 
-Selected architecture: Candidate A. The eventual app will verify a face and liveness locally, then decrypt and enter the customer's saved Mac password using Accessibility. The app now includes authenticated development credential storage and an explicitly armed, one-shot password-entry experiment. The ArcFace model is integrated separately and is not connected to password entry.
+Selected architecture: Candidate A. The eventual app will verify a face and liveness locally, then decrypt and enter the customer's saved Mac password using Accessibility. The app now includes authenticated development credential storage and an explicitly armed, one-shot password-entry experiment. Enrollment and model diagnostics remain separate from password entry; identity verification and liveness are not enabled.
 
 ## Build and run
 
@@ -15,7 +15,7 @@ open 'build/Face Unlock.app'
 
 Open `Package.swift` in Xcode to edit the project. The build script produces an ad-hoc-signed development app, not a customer distribution build.
 
-The app shows a plain development window with credential and manual-test controls. **Refresh status** reads existing Camera and Accessibility authorization without requesting permissions. A session monitor refreshes account and reported screen-lock observations every second and invalidates them on sleep or account-session transitions. The last eight distinct observation summaries stay in memory; the window shows the latest three. Lock/account checks and password entry remain marked **Diagnostics only** until live acceptance passes. ArcFace inference is implemented; enrolled identity verification and liveness remain unimplemented. Setup readiness is not an authentication result.
+The default **Face setup** screen provides a smooth native camera preview and a directional progress ring. Choose **Start face setup**, authenticate privately with macOS, and follow the gentle head-turn guide. The collector selects multiple stable video frames for each of nine angles, then **Save face** commits 18 encrypted descriptors. No brighter/dimmer tasks or saved video recording are needed. Switching apps pauses the camera; **Continue scan** resumes within the original three-minute authorization. Existing face setup can be checked, registered again, or removed. Older seven-view templates require fresh enrollment. Model diagnostics, credentials and manual password tests remain under **Developer tools**. See [continuous enrollment and validation](docs/CONTINUOUS_ENROLLMENT.md). **Refresh status** reads existing Camera and Accessibility authorization without requesting permissions. A session monitor refreshes account and reported screen-lock observations every second and invalidates them on sleep or account-session transitions. The last eight distinct observation summaries stay in memory; the window shows the latest three. Lock/account checks and password entry remain marked **Diagnostics only** until live acceptance passes. ArcFace inference is implemented; enrolled identity verification and liveness remain unimplemented. Setup readiness is not an authentication result.
 
 A camera probe can receive and discard one frame during an explicitly armed locked-session test if you grant Camera permission. The app never uses the microphone. Password entry requires a fresh matching account and locked-session report, Accessibility permission, an authorized 90-second credential session, and a focused secure field owned by verified Apple loginwindow. It uses PID-directed keyboard events and has no global input fallback.
 
@@ -25,9 +25,9 @@ No unattended automatic unlock, login item, system helper, or authentication-pol
 
 | Path | Responsibility |
 | --- | --- |
-| `Sources/FaceUnlockCore/` | Platform-independent setup requirements and readiness contract |
-| `Sources/FaceUnlockMac/` | macOS integrations; Session observation, development vault, guarded input, optional camera probe |
-| `Sources/FaceUnlockRecognition/` | Actor-confined Core ML model, Vision landmarks, five-point alignment, synthetic validation |
+| `Sources/FaceUnlockCore/` | Setup/session policy, embeddings, enrollment sample policy and readiness contract |
+| `Sources/FaceUnlockMac/` | macOS integrations; Session observation, development vault, guarded input, optional camera probe, separate encrypted enrollment vault |
+| `Sources/FaceUnlockRecognition/` | Actor-confined Core ML model, Vision landmarks, five-point alignment, synthetic validation, bounded enrollment camera capture |
 | `Sources/FaceRecognitionDiagnostics/` | Standalone synthetic model check/benchmark; no credential dependency |
 | `Models/` | Model provenance, research-use notice, synthetic reference; weights remain ignored local assets |
 | `Sources/FaceUnlockApp/` | App lifecycle, dependency composition, minimal diagnostic window |

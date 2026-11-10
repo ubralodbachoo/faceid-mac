@@ -77,10 +77,13 @@ final class SystemAuthenticator: SystemAuthenticating {
 final class DevelopmentKeyStore: CredentialKeyStoring {
     private let service: String
     private let account: String
+    private let label: String
 
-    init(service: String = "org.faceunlock.development.credential-key.v1", account: String = String(getuid())) {
+    init(service: String = "org.faceunlock.development.credential-key.v1", account: String = String(getuid()),
+         label: String = "Face Unlock development encryption key") {
         self.service = service
         self.account = account
+        self.label = label
     }
 
     private var query: [String: Any] { [
@@ -107,12 +110,12 @@ final class DevelopmentKeyStore: CredentialKeyStoring {
 
     func create(_ data: Data) throws {
         var access: SecAccess?
-        let accessStatus = SecAccessCreate("Face Unlock development encryption key" as CFString, nil, &access)
+        let accessStatus = SecAccessCreate(label as CFString, nil, &access)
         guard accessStatus == errSecSuccess, let access else { throw VaultError.keychain(accessStatus) }
         var query = query
         query[kSecValueData as String] = data
         query[kSecAttrAccess as String] = access
-        query[kSecAttrLabel as String] = "Face Unlock development encryption key"
+        query[kSecAttrLabel as String] = label
         query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
         let status = SecItemAdd(query as CFDictionary, nil)
         // Never update an existing key: a duplicate is an error, not a reason to destroy ciphertext.
@@ -130,10 +133,14 @@ final class DevelopmentKeyStore: CredentialKeyStoring {
 @MainActor
 final class FileCredentialStore: CredentialBlobStoring {
     let directory: URL
-    private var file: URL { directory.appendingPathComponent("credential-v1.enc") }
+    private let filename: String
+    private var file: URL { directory.appendingPathComponent(filename) }
 
-    init(directory: URL = URL.applicationSupportDirectory.appendingPathComponent("FaceUnlockDevelopment", isDirectory: true)) {
+    init(directory: URL = URL.applicationSupportDirectory.appendingPathComponent("FaceUnlockDevelopment", isDirectory: true),
+         filename: String = "credential-v1.enc") {
+        precondition(["credential-v1.enc", "enrollment-v1.enc"].contains(filename))
         self.directory = directory
+        self.filename = filename
     }
 
     private func validatePath(create: Bool) throws {

@@ -14,7 +14,7 @@ struct RecognitionTestView: View {
                 if model.isBusy { Button("Cancel") { model.cancel() } }
             }
             Text(model.status).font(.callout).textSelection(.enabled)
-            Text("No face enrollment or liveness verification yet. These diagnostics cannot enter your password.")
+            Text("Model diagnostics do not compare your identity or verify liveness. Use the separate enrollment controls to save a face template.")
                 .font(.caption).foregroundStyle(.secondary)
             Text("Research weights: commercial distribution rights remain unresolved.")
                 .font(.caption).foregroundStyle(.secondary)
