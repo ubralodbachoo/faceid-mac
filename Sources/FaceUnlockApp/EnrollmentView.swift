@@ -3,6 +3,7 @@ import FaceUnlockCore
 
 struct EnrollmentView: View {
     @ObservedObject var model: EnrollmentModel
+    var onTestFace: () -> Void = {}
     @State private var confirmingRemoval = false
 
     var body: some View {
@@ -49,7 +50,7 @@ struct EnrollmentView: View {
                 Label("Processed on this Mac. Camera images are never saved.", systemImage: "lock.shield")
                 Text(model.phase == .capturing || model.phase == .paused || model.phase == .review
                      ? "Switching apps pauses the camera. \(remainingTime) remaining to finish."
-                     : "Face registration only. Automatic unlocking is not enabled yet.")
+                    : "Try Face test to compare your face. Automatic unlocking is not enabled yet.")
             }
             .font(.caption).foregroundStyle(.secondary)
             .multilineTextAlignment(.center)
@@ -89,9 +90,10 @@ struct EnrollmentView: View {
             VStack(spacing: 12) {
                 HStack(spacing: 12) {
                     Button("Register again", action: model.start)
-                    Button("Check saved face", action: model.inspectSaved)
+                    Button("Test my face", action: onTestFace)
                         .buttonStyle(.borderedProminent)
                 }
+                Button("Check saved data", action: model.inspectSaved).buttonStyle(.link).font(.caption)
                 Button("Remove saved face…", role: .destructive) { confirmingRemoval = true }
                     .buttonStyle(.link).font(.caption)
             }
@@ -105,7 +107,7 @@ struct EnrollmentView: View {
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("startFaceSetup")
                 if model.hasEnrollment {
-                    Button("Check saved face", action: model.inspectSaved)
+                    Button("Check saved data", action: model.inspectSaved)
                 }
             }
         }

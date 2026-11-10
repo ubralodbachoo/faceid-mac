@@ -11,7 +11,7 @@ struct FaceUnlockApp: App {
     var body: some Scene {
         WindowGroup("Face Unlock") {
             StatusView(model: model)
-                .onAppear { delegate.onTermination = { model.manualTest.cancel(); model.recognition.cancel(); model.enrollment.cancel() } }
+                .onAppear { delegate.onTermination = { model.manualTest.cancel(); model.recognition.cancel(); model.enrollment.cancel(); model.faceTest.cancel() } }
         }
         .windowResizability(.contentSize)
     }
@@ -32,6 +32,7 @@ final class AppModel: ObservableObject {
     let manualTest: ManualUnlockController
     let recognition = RecognitionTestModel()
     let enrollment = EnrollmentModel()
+    let faceTest = FaceTestModel()
 
     init(provider: any ReadinessProviding) {
         self.provider = provider

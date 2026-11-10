@@ -1,6 +1,6 @@
 # Face Unlock for Mac — functional-first project plan
 
-Functional-first plan · updated November 10, 2026 · Milestone 3 live enrollment/Save confirmed; restart/lifecycle acceptance, commercial model rights and remaining Milestone 1 hardware acceptance are pending.
+Functional-first plan · updated November 10, 2026 · Milestone 3 live enrollment/Save confirmed; Milestone 4 experimental face comparison implemented. Recognition calibration, restart/lifecycle acceptance, commercial model rights and remaining Milestone 1 hardware acceptance are pending.
 
 ## Current increment
 
@@ -103,6 +103,8 @@ Acceptance evidence:
 The archived prototype's encrypted reference photographs are not identity templates; the new implementation should start with fresh enrollment unless a deliberate migration is designed.
 
 ## Milestone 4 — validate identity and liveness
+
+Started November 10, 2026 at the owner's request. Version 0.7.0 adds an explicit **Test my face** screen: fresh macOS-authorized template reading, live camera comparison, 12-frame temporal aggregation, visible provisional similarity cutoffs and similar/different/inconclusive results. The old storage check is relabeled **Check saved data**. Native validation passes 100 tests, including actual Vision/Core ML comparison of public-photo brightness variants. The owner reported the first live **“Face looks similar”** result after app restart; its numeric score was not supplied. Repeated genuine/negative tests and held-out accuracy/calibration remain pending. Liveness, durable attempt policy and automatic unlocking are not implemented by this increment. See [Milestone 4 implementation and evaluation runbook](docs/MILESTONE_4.md).
 
 Compare normalized embeddings against enrolled templates with an explicitly calibrated threshold. Set false-acceptance, false-rejection, latency, and retry targets before enabling automatic unlock. Similarity values are not probabilities of identity.
 

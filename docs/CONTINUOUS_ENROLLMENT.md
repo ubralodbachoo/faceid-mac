@@ -8,7 +8,7 @@ November 10, 2026. Implemented at the owner's request after inspecting the suppl
 2. Look naturally at the camera. The collector establishes a stable reference for the camera's angle rather than requiring zero head pitch.
 3. Follow the circle: left → upper-left → up → upper-right → right → lower-right → down → lower-left. Move gently, then settle briefly. Ring segments fill from actual accepted frame windows.
 4. The camera stops after all nine angles (including center) are collected. Choose **Save face** to encrypt the template. Nothing is persisted before this explicit action.
-5. Restart the app and choose **Check saved face** to validate persistence privately through macOS authentication.
+5. Restart the app and choose **Check saved data** (called **Check saved face** in 0.6.0) to validate persistence privately through macOS authentication. Version 0.7.0 also provides a separate **Face test** camera comparison; see [Milestone 4](MILESTONE_4.md).
 
 There are no brighter/dimmer tasks in the basic scan. Additional lighting variation and held-out genuine/impostor evaluation remain acceptance work. Switching apps pauses with the camera off; **Continue scan** starts a fresh stream within the original three-minute authorization. Sleep, lock, account change, cancellation, closing the window and expiry discard pending enrollment. Background review cannot save until the app returns to the foreground.
 

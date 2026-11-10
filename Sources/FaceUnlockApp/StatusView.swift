@@ -5,11 +5,14 @@ import FaceUnlockMac
 struct StatusView: View {
     @ObservedObject var model: AppModel
     @ObservedObject private var enrollment: EnrollmentModel
-    @State private var showsDiagnostics = false
+    @ObservedObject private var faceTest: FaceTestModel
+    private enum Page { case setup, faceTest, diagnostics }
+    @State private var page = Page.setup
 
     init(model: AppModel) {
         self.model = model
         self.enrollment = model.enrollment
+        self.faceTest = model.faceTest
     }
 
     var body: some View {
@@ -17,25 +20,33 @@ struct StatusView: View {
             HStack(spacing: 14) {
                 Label("Face Unlock", systemImage: "faceid").font(.headline)
                 Spacer()
-                Picker("View", selection: $showsDiagnostics) {
-                    Text("Face setup").tag(false)
-                    Text("Developer tools").tag(true)
+                Picker("View", selection: $page) {
+                    Text("Face setup").tag(Page.setup)
+                    Text("Face test").tag(Page.faceTest)
+                    Text("Developer tools").tag(Page.diagnostics)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 260)
-                .disabled(enrollment.isBusy || enrollment.canSave)
+                .frame(width: 360)
+                .disabled(enrollment.isBusy || enrollment.canSave || faceTest.isBusy)
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 16)
             Divider()
             ScrollView {
-                if showsDiagnostics { diagnostics }
-                else { EnrollmentView(model: enrollment) }
+                switch page {
+                case .diagnostics: diagnostics.disabled(enrollment.isBusy || enrollment.canSave || faceTest.isBusy)
+                case .setup:
+                    EnrollmentView(model: enrollment, onTestFace: { page = .faceTest })
+                        .disabled(faceTest.isBusy)
+                case .faceTest:
+                    FaceTestView(model: faceTest, hasEnrollment: enrollment.hasEnrollment)
+                        .disabled(enrollment.isBusy || enrollment.canSave)
+                }
             }
         }
         .frame(width: 640, height: 780)
-        .onDisappear { enrollment.cancel() }
+        .onDisappear { enrollment.cancel(); faceTest.cancel() }
     }
 
     private var diagnostics: some View {

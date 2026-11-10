@@ -54,6 +54,34 @@ final class FaceCaptureIntegrationTests: XCTestCase {
         XCTAssertTrue((0...1).contains(metrics.quality))
     }
 
+    func testNativePipelineComparesBrightnessVariantsThroughTemporalPolicy() async throws {
+        guard let modelPath = ProcessInfo.processInfo.environment["FACEUNLOCK_TEST_MODEL_PATH"] else {
+            throw XCTSkip("Native Core ML integration is opt-in")
+        }
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let recognizer = ArcFaceRecognizer(modelURL: URL(fileURLWithPath: modelPath))
+        _ = try await recognizer.validateAndBenchmark(referenceURL: root.appendingPathComponent("Models/ArcFaceReference.json"))
+        let crop = try XCTUnwrap(fixture().cropping(to: CGRect(x: 140, y: 20, width: 220, height: 240)))
+        let context = CIContext(options: [.cacheIntermediates: false])
+        let input = CIImage(cgImage: crop).transformed(by: CGAffineTransform(scaleX: 2, y: 2))
+        let source = try XCTUnwrap(context.createCGImage(input, from: input.extent))
+        let enrolled = try await recognizer.analyze(source)
+        let template = try EnrollmentTemplate(embeddings: Array(repeating: enrolled.embedding, count: 18),
+                                               modelIdentifier: ArcFaceContract.identifier)
+        var window = try FaceComparisonWindow(template: template)
+        for index in 0..<12 {
+            let variant = input.applyingFilter("CIColorControls", parameters: ["inputBrightness": Double(index % 3) * 0.025])
+            let image = try XCTUnwrap(context.createCGImage(variant, from: variant.extent))
+            let probe = try await recognizer.analyze(image)
+            let metrics = try XCTUnwrap(probe.enrollmentMetrics)
+            XCTAssertNil(FaceComparisonWindow.adjustment(for: metrics))
+            try window.observe(probe.embedding, metrics: metrics, at: Double(index) * 0.2)
+        }
+        XCTAssertEqual(window.result?.outcome, .similar)
+        // This is one public photo with derived variants: a mechanics regression, not accuracy,
+        // held-out genuine/impostor evaluation, or proof of liveness.
+    }
+
     private func fixture() throws -> CGImage {
         let url = try XCTUnwrap(Bundle.module.url(forResource: "astronaut", withExtension: "png", subdirectory: "Fixtures"))
         let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
