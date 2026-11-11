@@ -27,6 +27,7 @@ typealias EnrollmentImageAnalyzer = @MainActor (CGImage) async throws -> FaceAna
 /// Injectable boundaries let tests drive cancellation and camera feedback without using a camera.
 @MainActor
 struct EnrollmentCaptureServices {
+    private static var captureRecognizer: ArcFaceRecognizer?
     let prepare: () async throws -> EnrollmentImageAnalyzer
     let requestPermission: () async -> Bool
     let permissionDenied: () -> Bool
@@ -39,8 +40,9 @@ struct EnrollmentCaptureServices {
                   let reference = Bundle.main.url(forResource: "ArcFaceReference", withExtension: "json") else {
                 throw RecognitionError.missingModel
             }
-            let recognizer = ArcFaceRecognizer(modelURL: model)
-            _ = try await recognizer.validateAndBenchmark(referenceURL: reference)
+            let recognizer = captureRecognizer ?? ArcFaceRecognizer(modelURL: model)
+            captureRecognizer = recognizer
+            _ = try await recognizer.prepareForCapture(referenceURL: reference)
             return { image in try await recognizer.analyze(image) }
         }, requestPermission: { await EnrollmentCamera.requestPermission() },
            permissionDenied: { AVCaptureDevice.authorizationStatus(for: .video) == .denied },

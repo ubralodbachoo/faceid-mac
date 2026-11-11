@@ -52,7 +52,7 @@ final class FaceComparisonTests: XCTestCase {
     func testDuplicateTooFastAndGappedObservationsCannotCompleteWindow() throws {
         var window = try FaceComparisonWindow(template: template())
         try window.observe(embedding(), metrics: metrics(), at: 10)
-        for index in 1..<100 { try window.observe(embedding(), metrics: metrics(), at: 10 + Double(index) * 0.001) }
+        for index in 1..<100 { try window.observe(embedding(), metrics: metrics(), at: 10 + Double(index) * 0.0005) }
         XCTAssertEqual(window.count, 1)
         try window.observe(embedding(), metrics: metrics(), at: 11)
         XCTAssertEqual(window.count, 1, "A gap clears earlier evidence")
@@ -97,5 +97,22 @@ final class FaceComparisonTests: XCTestCase {
         XCTAssertTrue(String(reflecting: window).contains("redacted"))
         XCTAssertTrue(String(reflecting: try XCTUnwrap(window.result)).contains("redacted"))
         XCTAssertFalse(String(describing: window).contains("0.812"))
+    }
+
+    func testRollingComparisonDoesNotFreezeAnOldMatch() throws {
+        var window = try FaceComparisonWindow(template: template())
+        for index in 0..<12 { try window.observe(embedding(0.8), metrics: metrics(), at: Double(index) * 0.2) }
+        XCTAssertEqual(window.result?.outcome, .similar)
+        for index in 12..<24 { try window.observe(embedding(0.1), metrics: metrics(), at: Double(index) * 0.2) }
+        XCTAssertEqual(window.result?.outcome, .different, "A prior match cannot remain frozen while another face supplies a response")
+        XCTAssertEqual(window.count, 12)
+    }
+
+    func testRestoredWindowRequiresTwelveDistinctSpacedFrames() throws {
+        var window = try FaceComparisonWindow(template: template())
+        for index in 0..<11 {
+            XCTAssertNil(try window.observe(embedding(0.8), metrics: metrics(), at: Double(index) * 0.2))
+        }
+        XCTAssertEqual(try window.observe(embedding(0.8), metrics: metrics(), at: 2.2)?.outcome, .similar)
     }
 }

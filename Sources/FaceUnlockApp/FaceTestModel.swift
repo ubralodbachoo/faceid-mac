@@ -28,7 +28,17 @@ final class FaceTestModel: ObservableObject {
     @Published private(set) var latestSimilarity: Double?
     @Published private(set) var result: FaceComparisonResult?
     @Published private(set) var analysisMilliseconds: Double?
-    @Published private(set) var secondsRemaining = 15
+    @Published private(set) var preparationMilliseconds: Double?
+    @Published private(set) var cameraStartupMilliseconds: Double?
+    @Published private(set) var scanMilliseconds: Double?
+    @Published private(set) var completedCameraTimes: [Double] = []
+    @Published private(set) var failedCameraTests = 0
+    @Published private(set) var acquisitionSummary: String?
+    var averageCameraMilliseconds: Double? {
+        completedCameraTimes.isEmpty ? nil : completedCameraTimes.reduce(0, +) / Double(completedCameraTimes.count)
+    }
+    static let captureTimeout = 15.0
+    @Published private(set) var secondsRemaining = Int(captureTimeout)
     @Published private(set) var cameraSettingsNeeded = false
     private let vault: any FaceTestTemplateReading
     private let session: MacEnrollmentSession
@@ -37,17 +47,23 @@ final class FaceTestModel: ObservableObject {
     private var operation: Task<Void, Never>?
     private var watchdog: Task<Void, Never>?
     private var captureStarted: Double?
+    private var decisionStarted: Double?
+    private var captureDeadline: Task<Void, Never>?
     private var cancellationMessage: String?
+    private var analyzedFrameCount = 0
+    private var rejectedFrameCount = 0
+    private var lastAcquisitionFeedback = "No analysis completed."
     private var observers: [FaceTestNotificationToken] = []
 
     init(vault: any FaceTestTemplateReading = EnrollmentVault(modelIdentifier: ArcFaceContract.identifier),
-         session: MacEnrollmentSession = MacEnrollmentSession(), services: EnrollmentCaptureServices = .live) {
+         session: MacEnrollmentSession = MacEnrollmentSession(), services: EnrollmentCaptureServices = .live,
+         notifications: NotificationCenter? = nil) {
         self.vault = vault; self.session = session; self.services = services
         for event in [NSWorkspace.willSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
-            observe(NSWorkspace.shared.notificationCenter, event)
+            observe(notifications ?? NSWorkspace.shared.notificationCenter, event)
         }
-        observe(DistributedNotificationCenter.default(), NSNotification.Name("com.apple.screenIsLocked"))
-        observe(NotificationCenter.default, NSApplication.didResignActiveNotification, foregroundOnly: true)
+        observe(notifications ?? DistributedNotificationCenter.default(), NSNotification.Name("com.apple.screenIsLocked"))
+        observe(notifications ?? NotificationCenter.default, NSApplication.didResignActiveNotification, foregroundOnly: true)
     }
 
     private func observe(_ center: NotificationCenter, _ name: Notification.Name, foregroundOnly: Bool = false) {
@@ -64,7 +80,10 @@ final class FaceTestModel: ObservableObject {
         guard !isBusy else { return }
         vault.lock()
         result = nil; sampleCount = 0; latestSimilarity = nil; analysisMilliseconds = nil
-        cameraSettingsNeeded = false; cancellationMessage = nil; captureStarted = nil
+        preparationMilliseconds = nil; cameraStartupMilliseconds = nil; scanMilliseconds = nil
+        acquisitionSummary = nil; analyzedFrameCount = 0; rejectedFrameCount = 0
+        lastAcquisitionFeedback = "No analysis completed."
+        cameraSettingsNeeded = false; cancellationMessage = nil; captureStarted = nil; decisionStarted = nil
         isBusy = true; phase = .authorizing
         status = "Use Touch ID or your Mac password to open the saved face. The camera test follows."
         operation = Task {
@@ -78,7 +97,9 @@ final class FaceTestModel: ObservableObject {
                 phase = .preparing
                 status = "Preparing the camera and validating the face model."
                 startWatchdog()
+                let preparationStarted = services.now()
                 let analyze = try await services.prepare()
+                preparationMilliseconds = max(0, (services.now() - preparationStarted) * 1000)
                 try Task.checkCancellation()
                 try await session.waitForForeground()
                 guard await services.requestPermission() else {
@@ -92,23 +113,35 @@ final class FaceTestModel: ObservableObject {
                 try Task.checkCancellation()
                 try session.check()
                 try checkLease()
+                try checkCapture()
                 result = completed.result
                 latestSimilarity = completed.result.medianSimilarity
                 sampleCount = completed.result.frameCount
                 analysisMilliseconds = completed.medianMilliseconds
+                captureDeadline?.cancel(); captureDeadline = nil
+                if let scanMilliseconds {
+                    completedCameraTimes.append(scanMilliseconds)
+                    if completedCameraTimes.count > 20 { completedCameraTimes.removeFirst() }
+                }
                 phase = .finished
                 switch completed.result.outcome {
-                case .similar: status = "The camera face looks similar to your saved enrollment."
+                case .similar:
+                    status = "Your face looks similar. Liveness is unverified; a photo or video may also match."
                 case .different: status = "The camera face looks different from your saved enrollment."
                 case .inconclusive: status = "The scores are borderline or inconsistent. Try again in even light."
                 }
             } catch {
+                if decisionStarted != nil {
+                    recordAcquisitionSummary()
+                    if phase != .idle { failedCameraTests += 1 }
+                }
                 result = nil; sampleCount = 0; latestSimilarity = nil
-                phase = cancellationMessage == nil ? .failed : .idle
+                if cancellationMessage == nil { phase = .failed }
                 status = cancellationMessage ?? message(for: error)
             }
             watchdog?.cancel(); watchdog = nil
-            camera = nil; clearPreview(); captureStarted = nil
+            captureDeadline?.cancel(); captureDeadline = nil
+            camera = nil; clearPreview(); captureStarted = nil; decisionStarted = nil
             vault.lock()
             isBusy = false
         }
@@ -122,11 +155,17 @@ final class FaceTestModel: ObservableObject {
     private func capture(template: EnrollmentTemplate, analyze: EnrollmentImageAnalyzer) async throws -> Completed {
         var window = try FaceComparisonWindow(template: template)
         var timings: [Double] = []
+        var firstFrameTime: Double?
         let capture = services.makeCamera()
         camera = capture
-        phase = .capturing; secondsRemaining = 15
+        phase = .capturing; secondsRemaining = Int(Self.captureTimeout)
         status = "Look naturally toward the camera and hold still for a moment."
         captureStarted = services.now()
+        captureDeadline = Task {
+            do { try await Task.sleep(for: .seconds(Self.captureTimeout)) } catch { return }
+            guard isBusy, phase == .capturing else { return }
+            stop(FaceTestError.timeout.localizedDescription, phase: .failed)
+        }
         capture.start()
         do {
             for try await image in capture.frames {
@@ -135,37 +174,48 @@ final class FaceTestModel: ObservableObject {
                 previewImage = image
                 previewSession = capture.previewSessionForUI
                 let time = services.now()
+                if firstFrameTime == nil {
+                    firstFrameTime = time
+                    decisionStarted = time
+                    cameraStartupMilliseconds = max(0, (time - (captureStarted ?? time)) * 1000)
+                }
                 do {
+                    analyzedFrameCount += 1
                     let analysis = try await analyze(image)
+                    analysisMilliseconds = max(0, (services.now() - time) * 1000)
                     try Task.checkCancellation()
                     try checkCapture()
                     // Slow/stale inference never contributes a score to a fresh temporal window.
                     guard services.now() - time <= 0.75, services.now() >= time else {
                         window.interrupt(); timings.removeAll(); update(window)
                         status = "The camera analysis is catching up. Hold still and try brighter light."
+                        rejectedFrameCount += 1; lastAcquisitionFeedback = status
                         continue
                     }
                     guard let metrics = analysis.enrollmentMetrics else { throw RecognitionError.poseUnavailable }
                     if let hint = FaceComparisonWindow.adjustment(for: metrics) {
+                        rejectedFrameCount += 1; lastAcquisitionFeedback = hint
                         window.interrupt(); timings.removeAll(); update(window); status = hint
                         continue
                     }
                     let before = window.count
                     let completed = try window.observe(analysis.embedding, metrics: metrics, at: time)
                     if window.count < before { timings.removeAll() }
-                    if window.count > before || window.count == 1 {
-                        timings.append((services.now() - time) * 1000)
-                    }
+                    timings.append((services.now() - time) * 1000)
+                    if timings.count > FaceComparisonPolicy.requiredFrames { timings.removeFirst() }
                     update(window)
+                    lastAcquisitionFeedback = "Input usable."
                     status = "Comparing your face… \(sampleCount) of \(FaceComparisonPolicy.requiredFrames) usable frames."
                     if let completed {
                         let ordered = timings.sorted()
                         let milliseconds = ordered.isEmpty ? 0 : ordered[ordered.count / 2]
                         await capture.stopAndWait()
                         camera = nil; clearPreview()
+                        scanMilliseconds = max(0, (services.now() - (firstFrameTime ?? time)) * 1000)
                         return Completed(result: completed, medianMilliseconds: milliseconds)
                     }
                 } catch let error as RecognitionError {
+                    rejectedFrameCount += 1
                     window.interrupt(); timings.removeAll(); update(window)
                     switch error {
                     case .noFace: status = "Bring your face into view. Look toward the camera."
@@ -173,6 +223,7 @@ final class FaceTestModel: ObservableObject {
                     case .landmarks, .poseUnavailable, .captureQualityUnavailable: status = error.localizedDescription
                     default: throw error
                     }
+                    lastAcquisitionFeedback = status
                 }
             }
             throw FaceTestError.camera
@@ -187,6 +238,12 @@ final class FaceTestModel: ObservableObject {
         sampleCount = window.count; latestSimilarity = window.latestSimilarity
     }
 
+    private func recordAcquisitionSummary() {
+        guard acquisitionSummary == nil else { return }
+        acquisitionSummary = "\(analyzedFrameCount) frames analyzed; \(sampleCount) of \(FaceComparisonPolicy.requiredFrames) in the last usable burst; \(rejectedFrameCount) rejected. Last feedback: \(lastAcquisitionFeedback)"
+        if let decisionStarted { scanMilliseconds = max(0, (services.now() - decisionStarted) * 1000) }
+    }
+
     private func checkLease() throws {
         guard vault.sessionIsValid else { throw EnrollmentError.expired }
     }
@@ -196,8 +253,8 @@ final class FaceTestModel: ObservableObject {
         try checkLease()
         guard let captureStarted else { throw FaceTestError.timeout }
         let elapsed = services.now() - captureStarted
-        guard elapsed.isFinite, elapsed >= 0, elapsed < 15 else { throw FaceTestError.timeout }
-        secondsRemaining = max(0, Int(ceil(15 - elapsed)))
+        guard elapsed.isFinite, elapsed >= 0, elapsed < Self.captureTimeout else { throw FaceTestError.timeout }
+        secondsRemaining = max(0, Int(ceil(Self.captureTimeout - elapsed)))
     }
 
     // Also runs without incoming frames, so a disconnected/stalled camera cannot keep a test alive.
@@ -207,7 +264,7 @@ final class FaceTestModel: ObservableObject {
             try session.check(requireForeground: phase == .capturing)
             try checkLease()
             if phase == .capturing { try checkCapture() }
-        } catch { stop(message(for: error)) }
+        } catch { stop(message(for: error), phase: .failed) }
     }
 
     private func message(for error: any Error) -> String {
@@ -232,13 +289,15 @@ final class FaceTestModel: ObservableObject {
 
     func cancel() { if isBusy { stop("Test canceled. Your saved face is unchanged.") } }
 
-    private func stop(_ message: String) {
+    private func stop(_ message: String, phase: FaceTestPhase = .idle) {
+        if decisionStarted != nil { recordAcquisitionSummary() }
         cancellationMessage = message
         operation?.cancel(); camera?.stop()
         watchdog?.cancel(); watchdog = nil
+        captureDeadline?.cancel(); captureDeadline = nil
         clearPreview(); result = nil; latestSimilarity = nil; sampleCount = 0
         vault.lock()
-        phase = .idle; status = message
+        self.phase = phase; status = message
     }
 
     func openCameraSettings() {
@@ -259,7 +318,7 @@ private enum FaceTestError: Error, LocalizedError {
     case timeout, camera
     var errorDescription: String? {
         switch self {
-        case .timeout: "No comparison completed within 15 seconds. Try again with one well-lit face near the camera."
+        case .timeout: "No comparison completed within 15 seconds. Check the last camera feedback and try again."
         case .camera: "The camera could not provide a complete test. Check Camera permission and try again."
         }
     }

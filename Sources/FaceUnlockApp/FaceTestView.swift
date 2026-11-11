@@ -33,7 +33,7 @@ struct FaceTestView: View {
             if model.phase == .capturing {
                 ProgressView(value: Double(model.sampleCount), total: Double(FaceComparisonPolicy.requiredFrames))
                     .frame(width: 270)
-                Text("\(model.sampleCount) of 12 usable frames · \(model.secondsRemaining)s remaining")
+                Text("\(model.sampleCount) of \(FaceComparisonPolicy.requiredFrames) usable frames · \(model.secondsRemaining)s remaining")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -48,8 +48,12 @@ struct FaceTestView: View {
                         .font(.title3.monospacedDigit())
                     Text("Experimental cutoff: 0.500 · This score is not a probability.")
                         .font(.caption).foregroundStyle(.secondary)
+                    Text("Face comparison only · Liveness unverified")
+                        .font(.callout).foregroundStyle(.orange)
                     DisclosureGroup("Comparison details") {
-                        Text("12 frames, each compared with the three closest saved samples. \(result.aboveCutoff) of 12 were at or above the cutoff. Scores ranged from \(result.minimumSimilarity, specifier: "%.3f") to \(result.maximumSimilarity, specifier: "%.3f"). Median analysis: \(model.analysisMilliseconds ?? 0, specifier: "%.0f") ms per frame.")
+                        Text("\(result.frameCount) frames, each compared with the three closest saved samples. \(result.aboveCutoff) of \(result.frameCount) were at or above the cutoff. Scores ranged from \(result.minimumSimilarity, specifier: "%.3f") to \(result.maximumSimilarity, specifier: "%.3f"). Median analysis: \(model.analysisMilliseconds ?? 0, specifier: "%.0f") ms per frame.")
+                            .font(.caption).foregroundStyle(.secondary).padding(.top, 4)
+                        Text("Model preparation: \(model.preparationMilliseconds ?? 0, specifier: "%.0f") ms · Camera startup: \(model.cameraStartupMilliseconds ?? 0, specifier: "%.0f") ms · Camera test: \((model.scanMilliseconds ?? 0) / 1000, specifier: "%.2f") s. Touch ID time is excluded.")
                             .font(.caption).foregroundStyle(.secondary).padding(.top, 4)
                     }
                     .frame(maxWidth: 440)
@@ -58,6 +62,18 @@ struct FaceTestView: View {
             } else if let score = model.latestSimilarity {
                 Text("Live similarity \(score, specifier: "%.3f")")
                     .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+            }
+
+            if let summary = model.acquisitionSummary, model.phase == .failed {
+                Text(summary).font(.caption).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center).frame(maxWidth: 470)
+            }
+            if let average = model.averageCameraMilliseconds {
+                Text("Average camera test: \(average / 1000, specifier: "%.2f")s · \(model.completedCameraTimes.count) completed · \(model.failedCameraTests) failed")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if model.failedCameraTests > 0 {
+                Text("No completed camera comparisons · \(model.failedCameraTests) failed")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             HStack(spacing: 12) {
@@ -74,7 +90,8 @@ struct FaceTestView: View {
 
             VStack(spacing: 6) {
                 Text("Experimental recognition test. This does not unlock your Mac.")
-                Text("Liveness is not checked. A photo or video may also look similar.")
+                Text("The comparison finishes when 12 usable frames are collected. Scans stop after 15s if incomplete.")
+                Text("Liveness is unverified. A photo or video may also match.")
                 Text("Processed on this Mac. Images and test scores are not saved.")
             }
             .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
@@ -100,7 +117,7 @@ struct FaceTestView: View {
 
     private var resultColor: Color {
         switch model.result?.outcome {
-        case .similar: .mint
+        case .similar: .accentColor
         case .different, .inconclusive: .orange
         case nil: .accentColor
         }
@@ -108,7 +125,7 @@ struct FaceTestView: View {
 
     private var symbol: String {
         switch model.result?.outcome {
-        case .similar: "person.crop.circle.badge.checkmark"
+        case .similar: "person.crop.circle"
         case .different: "person.crop.circle.badge.xmark"
         case .inconclusive: "questionmark.circle"
         case nil: "person.crop.circle"

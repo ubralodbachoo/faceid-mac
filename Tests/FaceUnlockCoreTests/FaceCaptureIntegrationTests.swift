@@ -82,6 +82,31 @@ final class FaceCaptureIntegrationTests: XCTestCase {
         // held-out genuine/impostor evaluation, or proof of liveness.
     }
 
+    func testCapturePreparationReusesValidatedModelAndChangedReferenceFailsClosed() async throws {
+        guard let modelPath = ProcessInfo.processInfo.environment["FACEUNLOCK_TEST_MODEL_PATH"] else {
+            throw XCTSkip("Native Core ML integration is opt-in")
+        }
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let reference = root.appendingPathComponent("Models/ArcFaceReference.json")
+        let recognizer = ArcFaceRecognizer(modelURL: URL(fileURLWithPath: modelPath))
+        let start = ProcessInfo.processInfo.systemUptime
+        let first = try await recognizer.prepareForCapture(referenceURL: reference)
+        let firstMilliseconds = (ProcessInfo.processInfo.systemUptime - start) * 1000
+        let warmStart = ProcessInfo.processInfo.systemUptime
+        let cached = try await recognizer.prepareForCapture(referenceURL: reference)
+        let cachedMilliseconds = (ProcessInfo.processInfo.systemUptime - warmStart) * 1000
+        XCTAssertEqual(cached.medianMilliseconds, first.medianMilliseconds)
+        XCTAssertEqual(cached.minimumReferenceCosine, first.minimumReferenceCosine)
+        print(String(format: "Capture preparation: first %.1f ms; cached %.3f ms (one development measurement).", firstMilliseconds, cachedMilliseconds))
+        let invalid = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
+        try Data("{}".utf8).write(to: invalid)
+        defer { try? FileManager.default.removeItem(at: invalid) }
+        do { _ = try await recognizer.prepareForCapture(referenceURL: invalid); XCTFail("Bad reference was accepted") }
+        catch { XCTAssertEqual(error as? RecognitionError, .reference) }
+        do { _ = try await recognizer.analyze(fixture()); XCTFail("Failed validation left analysis enabled") }
+        catch { XCTAssertEqual(error as? RecognitionError, .reference) }
+    }
+
     private func fixture() throws -> CGImage {
         let url = try XCTUnwrap(Bundle.module.url(forResource: "astronaut", withExtension: "png", subdirectory: "Fixtures"))
         let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))

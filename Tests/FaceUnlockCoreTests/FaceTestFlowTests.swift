@@ -37,19 +37,21 @@ private final class TestComparisonCamera: EnrollmentCapturing {
     let continuation: AsyncThrowingStream<CGImage, any Error>.Continuation
     var started = false
     var stopped = false
+    var beforeStopCompletes: (() -> Void)?
     init() {
         let pair = AsyncThrowingStream<CGImage, any Error>.makeStream(bufferingPolicy: .bufferingNewest(1))
         frames = pair.stream; continuation = pair.continuation
     }
     func start() { started = true }
     func stop() { stopped = true; continuation.finish() }
-    func stopAndWait() async { stop() }
+    func stopAndWait() async { stop(); beforeStopCompletes?() }
 }
 
 @MainActor
 private final class ComparisonFixture {
     let vault: TestTemplateReader
     let camera = TestComparisonCamera()
+    let notifications = NotificationCenter()
     var time = 100.0
     var foreground = true
     var consoleUID: UInt32? = 501
@@ -75,7 +77,7 @@ private final class ComparisonFixture {
             }
         }, requestPermission: { [unowned self] in permission }, permissionDenied: { true },
            makeCamera: { [unowned self] in camera }, now: { [unowned self] in time })
-        model = FaceTestModel(vault: vault, session: session, services: services)
+        model = FaceTestModel(vault: vault, session: session, services: services, notifications: notifications)
     }
 
     func analysis() throws -> FaceAnalysis {
@@ -214,7 +216,7 @@ final class FaceTestFlowTests: XCTestCase {
         let fixture = try ComparisonFixture()
         fixture.model.start()
         await waitUntil { fixture.model.phase == .capturing }
-        fixture.time += 15
+        fixture.time += FaceTestModel.captureTimeout
         fixture.model.watchdogTick()
         await waitUntil { !fixture.model.isBusy }
         XCTAssertTrue(fixture.camera.stopped)
@@ -249,4 +251,133 @@ final class FaceTestFlowTests: XCTestCase {
         XCTAssertEqual(fixture.vault.authorizations, 1)
         XCTAssertEqual(fixture.vault.reads, 1)
     }
+
+    @MainActor
+    func testRestoredComparisonCollectsTwelveFramesWithoutEyeMeasurementsOrGesture() async throws {
+        let fixture = try ComparisonFixture()
+        fixture.model.start()
+        await waitUntil { fixture.model.phase == .capturing }
+        try await fixture.send(12)
+        await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.model.result?.outcome, .similar)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(fixture.model.scanMilliseconds), 1650)
+        XCTAssertTrue(fixture.model.status.contains("Liveness is unverified"))
+        XCTAssertTrue(fixture.camera.stopped)
+        XCTAssertEqual(fixture.model.completedCameraTimes.count, 1)
+        XCTAssertEqual(try XCTUnwrap(fixture.model.averageCameraMilliseconds), try XCTUnwrap(fixture.model.scanMilliseconds), accuracy: 0.001)
+        XCTAssertEqual(fixture.model.failedCameraTests, 0)
+    }
+
+    @MainActor
+    func testMissingFaceEventuallyTimesOutWithoutRestartingTheTimeout() async throws {
+        let fixture = try ComparisonFixture()
+        fixture.customAnalysis = { _ in throw RecognitionError.noFace }
+        fixture.model.start()
+        await waitUntil { fixture.model.phase == .capturing }
+        try await fixture.send()
+        fixture.time += FaceTestModel.captureTimeout
+        fixture.model.watchdogTick()
+        await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.model.phase, .failed)
+        XCTAssertTrue(fixture.model.status.contains("15 seconds"), fixture.model.status)
+        XCTAssertNil(fixture.model.result)
+        XCTAssertNil(fixture.model.previewImage)
+        XCTAssertFalse(fixture.vault.sessionIsValid)
+        XCTAssertEqual(fixture.model.failedCameraTests, 1)
+        XCTAssertNil(fixture.model.averageCameraMilliseconds)
+        XCTAssertTrue(fixture.model.acquisitionSummary?.contains("Bring your face") == true)
+    }
+
+    @MainActor
+    func testAnalysisReturningAfterDeadlineCannotPublishSimilarity() async throws {
+        let fixture = try ComparisonFixture()
+        var pending: CheckedContinuation<FaceAnalysis, any Error>?
+        fixture.customAnalysis = { _ in try await withCheckedThrowingContinuation { pending = $0 } }
+        fixture.model.start()
+        await waitUntil { fixture.model.phase == .capturing }
+        try await fixture.send()
+        await waitUntil { pending != nil }
+        fixture.time += FaceTestModel.captureTimeout
+        fixture.model.watchdogTick()
+        pending?.resume(returning: try fixture.analysis())
+        await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.model.phase, .failed)
+        XCTAssertNil(fixture.model.result)
+        XCTAssertEqual(fixture.model.sampleCount, 0)
+        XCTAssertTrue(fixture.camera.stopped)
+    }
+
+    @MainActor
+    func testRealTimeoutStopsAStalledStreamWithoutNewFramesOrClockPolling() async throws {
+        let fixture = try ComparisonFixture()
+        fixture.model.start()
+        await waitUntil { fixture.model.phase == .capturing }
+        try await fixture.send()
+        try await Task.sleep(for: .milliseconds(15150))
+        await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.model.phase, .failed)
+        XCTAssertTrue(fixture.model.status.contains("15 seconds"))
+        XCTAssertTrue(fixture.camera.stopped)
+        XCTAssertNil(fixture.model.result)
+    }
+
+    @MainActor
+    func testCameraStartupIsMeasuredSeparatelyWithinOriginalScanTimeout() async throws {
+        let fixture = try ComparisonFixture()
+        fixture.model.start()
+        await waitUntil { fixture.model.phase == .capturing }
+        fixture.time += 5
+        fixture.model.watchdogTick()
+        try await fixture.send(12)
+        await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.model.result?.outcome, .similar)
+        XCTAssertEqual(try XCTUnwrap(fixture.model.cameraStartupMilliseconds), 5200, accuracy: 1e-6)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(fixture.model.scanMilliseconds), 1650)
+    }
+
+    @MainActor
+    func testCameraShutdownCannotPublishAResultAfterTimeout() async throws {
+        let fixture = try ComparisonFixture()
+        fixture.camera.beforeStopCompletes = { [weak fixture] in fixture?.time += FaceTestModel.captureTimeout }
+        fixture.model.start()
+        await waitUntil { fixture.model.phase == .capturing }
+        try await fixture.send(12)
+        await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.model.phase, .failed)
+        XCTAssertNil(fixture.model.result)
+        XCTAssertTrue(fixture.model.status.contains("15 seconds"))
+    }
+
+    @MainActor
+    func testRestoredScanAllowsAcquisitionBeyondFormerEightSecondTimeout() async throws {
+        let fixture = try ComparisonFixture()
+        fixture.customAnalysis = { _ in throw RecognitionError.noFace }
+        fixture.model.start()
+        await waitUntil { fixture.model.phase == .capturing }
+        try await fixture.send(45)
+        XCTAssertTrue(fixture.model.isBusy)
+        XCTAssertNil(fixture.model.result)
+        fixture.customAnalysis = nil
+        try await fixture.send(12)
+        await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.model.result?.outcome, .similar)
+        XCTAssertGreaterThan(try XCTUnwrap(fixture.model.scanMilliseconds), 8000)
+        XCTAssertLessThan(try XCTUnwrap(fixture.model.scanMilliseconds), 15000)
+        XCTAssertEqual(fixture.model.completedCameraTimes.count, 1)
+    }
+
+    @MainActor
+    func testLockNotificationStillCancelsAndRevokesTemplateAccess() async throws {
+        let fixture = try ComparisonFixture()
+        fixture.model.start()
+        await waitUntil { fixture.model.phase == .capturing }
+        try await fixture.send()
+        fixture.notifications.post(name: NSNotification.Name("com.apple.screenIsLocked"), object: nil)
+        await waitUntil { !fixture.model.isBusy }
+        XCTAssertNil(fixture.model.result)
+        XCTAssertTrue(fixture.camera.stopped)
+        XCTAssertFalse(fixture.vault.sessionIsValid)
+        XCTAssertTrue(fixture.model.status.contains("Mac session changed"))
+    }
+
 }

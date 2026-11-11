@@ -2,10 +2,11 @@ import Foundation
 
 /// Diagnostic policy only. These engineering cutoffs are NOT calibrated authentication thresholds.
 public enum FaceComparisonPolicy {
-    public static let identifier = "top3-median12-diagnostic-v1"
+    public static let identifier = "top3-median12-diagnostic-v4"
     public static let similarCutoff = 0.50
     public static let differentCutoff = 0.40
     public static let requiredFrames = 12
+    public static let requiredAgreement = 10
     public static let minimumSpacing = 0.15
     public static let minimumDuration = 1.65
     public static let maximumGap = 0.60
@@ -30,7 +31,7 @@ public struct FaceComparisonResult: Sendable, CustomStringConvertible, CustomDeb
 public struct FaceComparisonWindow: CustomStringConvertible, CustomDebugStringConvertible {
     private let template: EnrollmentTemplate
     private var scores: [Double] = []
-    private var firstTime: Double?
+    private var times: [Double] = []
     private var lastTime: Double?
     private var previousBounds: FaceBounds?
     public private(set) var result: FaceComparisonResult?
@@ -46,7 +47,13 @@ public struct FaceComparisonWindow: CustomStringConvertible, CustomDebugStringCo
 
     public mutating func interrupt() {
         scores.removeAll(keepingCapacity: true)
-        firstTime = nil; lastTime = nil; previousBounds = nil; result = nil
+        times.removeAll(keepingCapacity: true); lastTime = nil; previousBounds = nil; result = nil
+    }
+
+    public func similarity(for embedding: FaceEmbedding) throws -> Double {
+        guard embedding.modelIdentifier == template.modelIdentifier else { throw EnrollmentError.incompatible }
+        let nearest = try template.embeddings.map { try embedding.cosineSimilarity(to: $0) }.sorted(by: >).prefix(3)
+        return nearest.reduce(0, +) / 3
     }
 
     public static func adjustment(for metrics: EnrollmentMetrics) -> String? {
@@ -70,7 +77,6 @@ public struct FaceComparisonWindow: CustomStringConvertible, CustomDebugStringCo
     public mutating func observe(_ embedding: FaceEmbedding, metrics: EnrollmentMetrics, at time: Double) throws -> FaceComparisonResult? {
         guard embedding.modelIdentifier == template.modelIdentifier else { interrupt(); throw EnrollmentError.incompatible }
         guard time.isFinite, time >= 0, Self.adjustment(for: metrics) == nil else { interrupt(); return nil }
-        if let result { return result }
         if let lastTime {
             guard time > lastTime else { interrupt(); return nil }
             if time - lastTime > FaceComparisonPolicy.maximumGap { interrupt() }
@@ -83,23 +89,22 @@ public struct FaceComparisonWindow: CustomStringConvertible, CustomDebugStringCo
                 abs(bounds.y + bounds.height / 2 - previousBounds.y - previousBounds.height / 2) > 0.12 ||
                 newArea / oldArea > 1.8 || oldArea / newArea > 1.8 { interrupt() }
         }
-        let nearest = try template.embeddings.map { try embedding.cosineSimilarity(to: $0) }.sorted(by: >).prefix(3)
-        let score = nearest.reduce(0, +) / 3
-        if firstTime == nil { firstTime = time }
+        let score = try similarity(for: embedding)
         lastTime = time; previousBounds = metrics.faceBounds
-        scores.append(score)
+        scores.append(score); times.append(time); result = nil
         // A bounded rolling window must satisfy BOTH frame count and elapsed camera time.
-        if scores.count > FaceComparisonPolicy.requiredFrames { scores.removeFirst() }
+        if scores.count > FaceComparisonPolicy.requiredFrames { scores.removeFirst(); times.removeFirst() }
         guard scores.count == FaceComparisonPolicy.requiredFrames,
-              let firstTime, time - firstTime + 1e-9 >= FaceComparisonPolicy.minimumDuration else { return nil }
+              let firstTime = times.first, time - firstTime + 1e-9 >= FaceComparisonPolicy.minimumDuration else { return nil }
         let ordered = scores.sorted()
-        let median = (ordered[5] + ordered[6]) / 2
+        let middle = ordered.count / 2
+        let median = (ordered[middle - 1] + ordered[middle]) / 2
         let above = scores.filter { $0 >= FaceComparisonPolicy.similarCutoff }.count
         let below = scores.filter { $0 < FaceComparisonPolicy.differentCutoff }.count
-        let outcome: FaceComparisonOutcome = median >= FaceComparisonPolicy.similarCutoff && above >= 10 ? .similar :
-            (median < FaceComparisonPolicy.differentCutoff && below >= 10 ? .different : .inconclusive)
+        let outcome: FaceComparisonOutcome = median >= FaceComparisonPolicy.similarCutoff && above >= FaceComparisonPolicy.requiredAgreement ? .similar :
+            (median < FaceComparisonPolicy.differentCutoff && below >= FaceComparisonPolicy.requiredAgreement ? .different : .inconclusive)
         let completed = FaceComparisonResult(outcome: outcome, medianSimilarity: median,
-                                             minimumSimilarity: ordered[0], maximumSimilarity: ordered[11],
+                                             minimumSimilarity: ordered[0], maximumSimilarity: ordered[ordered.count - 1],
                                              aboveCutoff: above, frameCount: scores.count)
         result = completed
         return completed

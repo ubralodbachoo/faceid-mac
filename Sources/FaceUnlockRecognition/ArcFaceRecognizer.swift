@@ -60,7 +60,9 @@ public actor ArcFaceRecognizer {
     private var model: MLModel?
     private var loadMilliseconds = 0.0
     private var validated = false
-    private let context = CIContext()
+    private var captureReference: URL?
+    private var captureReport: RecognitionCheckReport?
+    private let context = CIContext(options: [.cacheIntermediates: false])
 
     public init(modelURL: URL) { self.modelURL = modelURL }
 
@@ -92,6 +94,7 @@ public actor ArcFaceRecognizer {
     /// Uses deterministic synthetic RGB only. Passing does not establish face accuracy or liveness.
     public func validateAndBenchmark(referenceURL: URL) throws -> RecognitionCheckReport {
         validated = false
+        captureReference = nil; captureReport = nil
         let model = try load()
         let reference: ReferenceFixture
         do { reference = try JSONDecoder().decode(ReferenceFixture.self, from: Data(contentsOf: referenceURL)) }
@@ -127,6 +130,16 @@ public actor ArcFaceRecognizer {
             medianMilliseconds: durations[durations.count / 2], p95Milliseconds: durations[28],
             measuredPredictions: durations.count, computeUnits: "all (Core ML chooses CPU/GPU/Neural Engine)"
         )
+    }
+
+    /// Bundle assets are immutable for a running release. Validate once per actor/reference;
+    /// explicit diagnostics still rerun the complete numerical check and benchmark.
+    public func prepareForCapture(referenceURL: URL) throws -> RecognitionCheckReport {
+        if validated, captureReference == referenceURL.standardizedFileURL, let captureReport { return captureReport }
+        let report = try validateAndBenchmark(referenceURL: referenceURL)
+        captureReference = referenceURL.standardizedFileURL
+        captureReport = report
+        return report
     }
 
     public func analyzeImage(at url: URL) throws -> FaceAnalysis {
