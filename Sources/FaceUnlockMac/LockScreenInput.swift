@@ -11,10 +11,10 @@ public enum InputDiagnostics {
     }
 }
 
-enum InputError: Error, LocalizedError {
+public enum InputError: Error, LocalizedError {
     case accessibility, target, field, changed, event
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .accessibility: "Accessibility permission is missing. Enable this app in System Settings."
         case .target: "The focused application is not verified Apple loginwindow."

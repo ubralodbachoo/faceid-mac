@@ -4,6 +4,7 @@ import FaceUnlockCore
 struct EnrollmentView: View {
     @ObservedObject var model: EnrollmentModel
     var onTestFace: () -> Void = {}
+    var onContinue: (() -> Void)? = nil
     @State private var confirmingRemoval = false
 
     var body: some View {
@@ -23,7 +24,7 @@ struct EnrollmentView: View {
                 Text("\(model.completedPoses) of 9 angles ready")
                     .font(.caption).foregroundStyle(.secondary)
                     .accessibilityLabel("\(model.completedPoses) of 9 face angles captured")
-            } else {
+            } else if onContinue == nil {
                 HStack(spacing: 12) {
                     Label("Confirm", systemImage: "lock")
                     Image(systemName: "chevron.right").font(.system(size: 9))
@@ -50,7 +51,8 @@ struct EnrollmentView: View {
                 Label("Processed on this Mac. Camera images are never saved.", systemImage: "lock.shield")
                 Text(model.phase == .capturing || model.phase == .paused || model.phase == .review
                      ? "Switching apps pauses the camera. \(remainingTime) remaining to finish."
-                    : "Try Face test to compare your face. Automatic unlocking is not enabled yet.")
+                    : onContinue != nil ? "Save your face, then continue to your Mac password."
+                    : "Try Face test to compare your face, or finish setup to enable face unlock.")
             }
             .font(.caption).foregroundStyle(.secondary)
             .multilineTextAlignment(.center)
@@ -69,7 +71,10 @@ struct EnrollmentView: View {
         if model.phase == .review {
             HStack(spacing: 12) {
                 Button("Cancel", action: model.cancel)
-                Button("Save face", action: model.save)
+                Button(onContinue == nil ? "Save face" : "Save face and continue") {
+                    model.save()
+                    if model.phase == .saved { onContinue?() }
+                }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(model.isBusy || !model.canSave)
@@ -90,12 +95,14 @@ struct EnrollmentView: View {
             VStack(spacing: 12) {
                 HStack(spacing: 12) {
                     Button("Register again", action: model.start)
-                    Button("Test my face", action: onTestFace)
+                    Button(onContinue == nil ? "Test my face" : "Continue", action: onContinue ?? onTestFace)
                         .buttonStyle(.borderedProminent)
                 }
-                Button("Check saved data", action: model.inspectSaved).buttonStyle(.link).font(.caption)
-                Button("Remove saved face…", role: .destructive) { confirmingRemoval = true }
-                    .buttonStyle(.link).font(.caption)
+                DisclosureGroup("Manage saved face") {
+                    Button("Check saved data", action: model.inspectSaved).buttonStyle(.link).font(.caption)
+                    Button("Remove saved face…", role: .destructive) { confirmingRemoval = true }
+                        .buttonStyle(.link).font(.caption)
+                }.fixedSize().font(.caption)
             }
         } else {
             HStack(spacing: 12) {

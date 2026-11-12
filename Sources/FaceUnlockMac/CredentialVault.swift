@@ -9,6 +9,7 @@ import FaceUnlockCore
 public enum VaultError: Error, LocalizedError {
     case locked, canceled, missingKey, invalidKey, invalidPassword, corrupt, storage, authentication, operationCanceled
     case keychain(OSStatus)
+    case experimentalConsent, missingPassword
 
     public var errorDescription: String? {
         switch self {
@@ -22,6 +23,8 @@ public enum VaultError: Error, LocalizedError {
         case .authentication: "System authentication failed or is unavailable."
         case .operationCanceled: "The operation was canceled or the active session changed."
         case .keychain(let status): "Keychain operation failed (status \(status)). No fallback key store was used."
+        case .experimentalConsent: "Acknowledge that photos or videos may unlock this Mac before enabling experimental face unlock."
+        case .missingPassword: "Enter and save your Mac login password in setup before enabling face unlock."
         }
     }
 }
@@ -195,6 +198,7 @@ final class FileCredentialStore: CredentialBlobStoring {
 
 @MainActor
 public final class CredentialVault: ObservableObject {
+    public static let didChangeNotification = Notification.Name("org.faceunlock.credentialChanged")
     @Published public private(set) var isAuthorized = false
     @Published public private(set) var hasCredential = false
     @Published public private(set) var isBusy = false
@@ -206,6 +210,8 @@ public final class CredentialVault: ObservableObject {
     private let associatedData: Data
     private var key: SymmetricKey?
     private var lease: CredentialLease?
+    private var experimentalIssuedAt: Double?
+    private var authorizedBlobDigest: Data?
     private var generation = UUID()
     private var expiryTask: Task<Void, Never>?
 
@@ -223,7 +229,14 @@ public final class CredentialVault: ObservableObject {
         refreshPresence()
     }
 
-    public var sessionIsValid: Bool { key != nil && lease?.isValid(at: now()) == true }
+    public var sessionIsValid: Bool {
+        guard key != nil else { return false }
+        if let issued = experimentalIssuedAt {
+            let time = now()
+            return issued.isFinite && issued >= 0 && time.isFinite && time >= issued
+        }
+        return lease?.isValid(at: now()) == true
+    }
 
     public func refreshPresence() {
         do { hasCredential = try blobs.read() != nil }
@@ -232,17 +245,37 @@ public final class CredentialVault: ObservableObject {
     }
 
     public func authorize() async throws {
+        try await authorize(experimental: false)
+    }
+
+    public func authorizeForPasswordSetup() async throws {
+        try await authorize(experimental: false, reason: "Save your Mac login password securely on this Mac for Face Unlock.")
+    }
+
+    /// Separate opt-in read session, owned by the automatic controller and revoked on disable/quit/account change.
+    /// The existing manual 90-second session is unchanged. No plaintext password is cached.
+    public func authorizeExperimentalFaceUnlock(acknowledgingPhotoRisk: Bool) async throws {
+        guard acknowledgingPhotoRisk else { throw VaultError.experimentalConsent }
+        try await authorize(experimental: true)
+    }
+
+    private func authorize(experimental: Bool, reason: String? = nil) async throws {
         guard !isBusy else { throw VaultError.operationCanceled }
         lock()
         let token = generation
         isBusy = true
         defer { isBusy = false }
-        try await authenticator.authenticate(reason: "Authorize a 90-second Face Unlock development test session")
+        if experimental, try blobs.read() == nil { throw VaultError.missingPassword }
+        try await authenticator.authenticate(reason: reason ?? (experimental
+            ? "Allow experimental camera matches to enter your saved Mac password while Face Unlock is enabled. Photos or videos may also unlock this Mac."
+            : "Authorize a 90-second Face Unlock development test session"))
+        try Task.checkCancellation()
         guard token == generation else { throw VaultError.operationCanceled }
         var keyData = Data()
         defer { keyData.resetBytes(in: 0..<keyData.count) }
         if let existing = try keys.read() { keyData = existing }
         else {
+            guard !experimental else { throw VaultError.missingKey }
             guard try blobs.read() == nil else { throw VaultError.missingKey }
             keyData = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
             try keys.create(keyData)
@@ -252,9 +285,20 @@ public final class CredentialVault: ObservableObject {
         }
         guard keyData.count == 32 else { throw VaultError.invalidKey }
         key = SymmetricKey(data: keyData)
-        lease = CredentialLease(now: now())
+        if experimental {
+            let issued = now()
+            guard issued.isFinite, issued >= 0, let blob = try blobs.read() else { lock(); throw VaultError.locked }
+            experimentalIssuedAt = issued
+            authorizedBlobDigest = Data(SHA256.hash(data: blob))
+            // Validate the authorized ciphertext once, then wipe its plaintext immediately.
+            do { try withPassword { _ in } }
+            catch { lock(); throw error }
+            hasCredential = true
+        } else { lease = CredentialLease(now: now()) }
         isAuthorized = true
-        status = "Authorized for 90 seconds; explicit one-shot arming is still required"
+        status = experimental
+            ? "Experimental face unlock authorized until disabled, quit or account change. Photos/video may unlock."
+            : "Authorized for 90 seconds; explicit one-shot arming is still required"
         expiryTask = Task { [weak self] in
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(1)) } catch { return }
@@ -271,11 +315,13 @@ public final class CredentialVault: ObservableObject {
         expiryTask = nil
         key = nil
         lease = nil
+        experimentalIssuedAt = nil; authorizedBlobDigest = nil
         isAuthorized = false
         status = "Credential session locked"
     }
 
     public func save(_ password: Data) throws {
+        guard experimentalIssuedAt == nil else { throw VaultError.locked }
         guard let key, sessionIsValid else { lock(); throw VaultError.locked }
         guard !password.isEmpty, password.count <= 1024, let string = String(data: password, encoding: .utf8),
               !string.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
@@ -286,11 +332,15 @@ public final class CredentialVault: ObservableObject {
         try blobs.write(Data("FUM1".utf8) + data)
         hasCredential = true
         status = "Password saved encrypted. Its correctness has not been verified."
+        NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
     }
 
     func withPassword<T>(_ action: (Data) throws -> T) throws -> T {
         guard let key, sessionIsValid else { lock(); throw VaultError.locked }
         guard let blob = try blobs.read(), blob.starts(with: Data("FUM1".utf8)) else { throw VaultError.corrupt }
+        if let authorizedBlobDigest, Data(SHA256.hash(data: blob)) != authorizedBlobDigest {
+            lock(); throw VaultError.operationCanceled
+        }
         var plaintext: Data
         do {
             plaintext = try AES.GCM.open(AES.GCM.SealedBox(combined: blob.dropFirst(4)), using: key, authenticating: associatedData)
@@ -311,6 +361,7 @@ public final class CredentialVault: ObservableObject {
         try keys.delete()
         try blobs.delete()
         status = "Stored password and encryption key removed"
+        NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
     }
 
     deinit { expiryTask?.cancel() }

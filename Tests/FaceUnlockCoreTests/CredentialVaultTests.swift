@@ -46,6 +46,21 @@ private final class TestAuthenticator: SystemAuthenticating {
 
 final class CredentialVaultTests: XCTestCase {
     @MainActor
+    func testPasswordSetupUsesAuthenticatedSaveAndKeepsNinetySecondExpiry() async throws {
+        let keys = MemoryKeys(), blobs = MemoryBlobs(), auth = TestAuthenticator()
+        var time = 100.0
+        let vault = CredentialVault(keys: keys, blobs: blobs, authenticator: auth, now: { time })
+        try await vault.authorizeForPasswordSetup()
+        XCTAssertEqual(auth.calls, 1)
+        try vault.save(Data("setup-fixture".utf8))
+        XCTAssertTrue(vault.hasCredential)
+        XCTAssertNil(blobs.value?.range(of: Data("setup-fixture".utf8)))
+        time += 90
+        XCTAssertFalse(vault.sessionIsValid)
+        XCTAssertThrowsError(try vault.withPassword { $0 })
+    }
+
+    @MainActor
     func testEncryptedSaveReplacementRestartAndDeletion() async throws {
         let keys = MemoryKeys(), blobs = MemoryBlobs(), auth = TestAuthenticator()
         let vault = CredentialVault(keys: keys, blobs: blobs, authenticator: auth)
@@ -180,5 +195,72 @@ final class CredentialVaultTests: XCTestCase {
         XCTAssertEqual(try store.read(), data)
         try store.delete()
         XCTAssertNil(try store.read())
+    }
+
+    @MainActor
+    func testExperimentalAuthorizationRequiresConsentAndAnExistingCredential() async throws {
+        let keys = MemoryKeys(), blobs = MemoryBlobs(), auth = TestAuthenticator()
+        let vault = CredentialVault(keys: keys, blobs: blobs, authenticator: auth)
+        do { try await vault.authorizeExperimentalFaceUnlock(acknowledgingPhotoRisk: false); XCTFail("Consent required") } catch {}
+        do { try await vault.authorizeExperimentalFaceUnlock(acknowledgingPhotoRisk: true); XCTFail("Saved password required") } catch {}
+        XCTAssertEqual(auth.calls, 0)
+        XCTAssertEqual(keys.creates, 0)
+        XCTAssertFalse(vault.sessionIsValid)
+    }
+
+    @MainActor
+    func testExperimentalReadSessionIsSeparateFromManualLeaseAndRevokedExplicitly() async throws {
+        var time = 100.0
+        let keys = MemoryKeys(), blobs = MemoryBlobs(), auth = TestAuthenticator()
+        let manual = CredentialVault(keys: keys, blobs: blobs, authenticator: auth, now: { time })
+        try await manual.authorize()
+        try manual.save(Data("synthetic-automatic-password".utf8))
+        let automatic = CredentialVault(keys: keys, blobs: blobs, authenticator: auth, now: { time })
+        try await automatic.authorizeExperimentalFaceUnlock(acknowledgingPhotoRisk: true)
+        time += 3600
+        XCTAssertFalse(manual.sessionIsValid)
+        XCTAssertTrue(automatic.sessionIsValid)
+        XCTAssertEqual(try automatic.withPassword { $0 }, Data("synthetic-automatic-password".utf8))
+        XCTAssertThrowsError(try automatic.save(Data("must-not-write".utf8)))
+        XCTAssertTrue(automatic.sessionIsValid, "This session has read-only credential access")
+        automatic.lock()
+        XCTAssertFalse(automatic.sessionIsValid)
+        XCTAssertThrowsError(try automatic.withPassword { $0 })
+        let restarted = CredentialVault(keys: keys, blobs: blobs, authenticator: auth, now: { time })
+        XCTAssertFalse(restarted.sessionIsValid)
+        XCTAssertEqual(auth.calls, 2)
+    }
+
+    @MainActor
+    func testPasswordReplacementInvalidatesAuthorizedCiphertext() async throws {
+        let keys = MemoryKeys(), blobs = MemoryBlobs(), auth = TestAuthenticator()
+        let manual = CredentialVault(keys: keys, blobs: blobs, authenticator: auth)
+        try await manual.authorize()
+        try manual.save(Data("original-synthetic".utf8))
+        let automatic = CredentialVault(keys: keys, blobs: blobs, authenticator: auth)
+        try await automatic.authorizeExperimentalFaceUnlock(acknowledgingPhotoRisk: true)
+        try manual.save(Data("replacement-synthetic".utf8))
+        XCTAssertThrowsError(try automatic.withPassword { $0 })
+        XCTAssertFalse(automatic.sessionIsValid)
+    }
+
+    @MainActor
+    func testCanceledLateOrCorruptExperimentalAuthorizationCannotRetainKey() async throws {
+        for scenario in 0..<4 {
+            let keys = MemoryKeys(), blobs = MemoryBlobs(), auth = TestAuthenticator()
+            let manual = CredentialVault(keys: keys, blobs: blobs, authenticator: auth)
+            try await manual.authorize()
+            try manual.save(Data("synthetic".utf8))
+            manual.lock()
+            let automatic = CredentialVault(keys: keys, blobs: blobs, authenticator: auth)
+            if scenario == 0 { auth.fail = true }
+            if scenario == 1 { auth.action = { automatic.lock() } }
+            if scenario == 2 { blobs.value![blobs.value!.count - 1] ^= 1 }
+            if scenario == 3 { keys.value = nil }
+            do { try await automatic.authorizeExperimentalFaceUnlock(acknowledgingPhotoRisk: true); XCTFail("Must fail") } catch {}
+            XCTAssertFalse(automatic.sessionIsValid)
+            XCTAssertFalse(automatic.isAuthorized)
+            XCTAssertEqual(keys.creates, 1, "Never regenerate an existing credential key")
+        }
     }
 }

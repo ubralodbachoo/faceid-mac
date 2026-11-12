@@ -7,6 +7,7 @@ import FaceUnlockCore
 /// Independent biometric vault: never reads the password key, ciphertext, or credential lease.
 @MainActor
 public final class EnrollmentVault: ObservableObject {
+    public static let didChangeNotification = Notification.Name("org.faceunlock.enrollmentChanged")
     @Published public private(set) var hasEnrollment = false
     private let keys: any CredentialKeyStoring
     private let blobs: any CredentialBlobStoring
@@ -120,6 +121,7 @@ public final class EnrollmentVault: ObservableObject {
         try blobs.write(Data("FUE1".utf8) + data)
         hasEnrollment = true
         lock()
+        NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
     }
 
     public func templateForVerification() throws -> EnrollmentTemplate {
@@ -165,6 +167,7 @@ public final class EnrollmentVault: ObservableObject {
         guard token == generation else { throw EnrollmentError.expired }
         try keys.delete()
         try blobs.delete()
+        NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
     }
 
     public func lock() {
