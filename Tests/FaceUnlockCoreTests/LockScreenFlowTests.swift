@@ -53,6 +53,7 @@ private final class LockFixture {
     var credentialAuthorizations = 0
     var credentialAuthenticationError: (any Error)?
     var inputPermission = true
+    var prepareInput: (() throws -> Void)?
     var reports: [LockScreenDiagnosticReport] = []
     var finishCamera: (() async -> Void)?
     var finishCalls = 0
@@ -85,6 +86,7 @@ private final class LockFixture {
                 if let credentialAuthenticationError { throw credentialAuthenticationError }
                 credentialsReady = true
             }, inputPermissionGranted: { [unowned self] in inputPermission },
+            prepareInput: { [unowned self] in try prepareInput?() },
             finishCamera: { [unowned self] in finishCalls += 1; if let finishCamera { await finishCamera() } },
             captureDiagnostics: { [unowned self] in capture },
             saveDiagnostic: { [unowned self] in reports.append($0) })
@@ -448,6 +450,43 @@ final class LockScreenFlowTests: XCTestCase {
         try await waitUntil { fixture.submissions == 1 && !fixture.model.isBusy }
         XCTAssertEqual(fixture.model.phase, .unlocked)
         XCTAssertEqual(fixture.reports.last?.mode, "experimental-unlock")
+    }
+
+    @MainActor
+    func testPasswordFieldBecomesReadyBeforeCameraStartsWithoutRetryingSubmission() async throws {
+        let fixture = try LockFixture(supportsExperimentalUnlock: true)
+        defer { fixture.model.disableAutomaticScanning() }
+        var checks = 0
+        fixture.prepareInput = {
+            checks += 1
+            XCTAssertEqual(fixture.scanCount, 0)
+            if checks < 3 { throw InputError.field }
+        }
+        try await enableExperimental(fixture)
+        fixture.autoDesktop = true
+        fixture.lock = .locked; fixture.model.automaticTick()
+        try await waitUntil { fixture.submissions == 1 && !fixture.model.isBusy }
+        XCTAssertEqual(checks, 3)
+        XCTAssertEqual(fixture.scanCount, 1)
+        XCTAssertEqual(fixture.model.phase, .unlocked)
+    }
+
+    @MainActor
+    func testSessionLossWhileWaitingForPasswordFieldCannotStartCameraOrSubmit() async throws {
+        let fixture = try LockFixture(supportsExperimentalUnlock: true)
+        defer { fixture.model.disableAutomaticScanning() }
+        var checks = 0
+        fixture.prepareInput = {
+            checks += 1
+            fixture.consoleUID = 502
+            throw InputError.field
+        }
+        try await enableExperimental(fixture)
+        fixture.lock = .locked; fixture.model.automaticTick()
+        try await waitUntil { checks > 0 && !fixture.model.isBusy }
+        XCTAssertEqual(fixture.scanCount, 0)
+        XCTAssertEqual(fixture.submissions, 0)
+        XCTAssertNotEqual(fixture.model.phase, .unlocked)
     }
 
     @MainActor

@@ -7,8 +7,8 @@
     <key>CFBundleDisplayName</key><string>Face Unlock</string>
     <key>CFBundleExecutable</key><string>FaceUnlock</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleVersion</key><string>19</string>
-    <key>CFBundleShortVersionString</key><string>0.10.0</string>
+    <key>CFBundleVersion</key><string>20</string>
+    <key>CFBundleShortVersionString</key><string>0.10.1</string>
     <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSCameraUsageDescription</key><string>Use the camera for local face registration, an explicitly started comparison, or explicitly enabled experimental face unlock on each lock. Lock-screen scans show an indicator without a camera preview. Frames stay in memory and are discarded; registration saves encrypted face descriptors only. No microphone is used.</string>

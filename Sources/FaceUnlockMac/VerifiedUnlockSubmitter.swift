@@ -10,6 +10,8 @@ public struct VerifiedUnlockSubmitter {
 
     public init(vault: CredentialVault) { self.vault = vault }
 
+    public func prepareInput() throws { try input.prepareTarget() }
+
     public func submit(attempt: inout FaceUnlockAttempt, verification: UnlockVerification,
                        isSuspended: () -> Bool) throws {
         guard !isSuspended() else { throw FaceUnlockAttemptError.session }

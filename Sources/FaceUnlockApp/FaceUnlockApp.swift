@@ -66,6 +66,7 @@ final class AppModel: ObservableObject {
                 }, supportsExperimentalUnlock: true,
                 authorizeCredentials: { try await credentials.authorizeExperimentalFaceUnlock(acknowledgingPhotoRisk: true) },
                 inputPermissionGranted: { AXIsProcessTrusted() },
+                prepareInput: { try submitter.prepareInput() },
                 finishCamera: { await scanner.finish() }, captureDiagnostics: { scanner.diagnostics },
                 saveDiagnostic: { reports.save($0) }))
         let lockScreen = lockScreen

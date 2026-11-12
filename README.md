@@ -90,3 +90,5 @@ The reported lock flag is undocumented. Missing information is **unknown**, neve
 See [PROJECT_PLAN.md](PROJECT_PLAN.md) for the roadmap and [architecture notes](docs/ARCHITECTURE.md) for the skeleton's boundaries.
 
 The previous prototype remains inactive in `archive/2026-11-09-prototype/`. Its code, research, assets, and builds are preserved locally and ignored by Git; this is not a remote backup. Its enrollment data and Keychain entries outside the repository were not deleted. The new skeleton does not read or migrate them.
+
+Version **0.10.1** waits up to three seconds for the verified Apple loginwindow password field before starting a face scan. It checks application-level focus as well as system-level focus and can focus a single enabled secure field inside the verified loginwindow tree. Ambiguous, unavailable or foreign fields still block input. Fresh face evidence and one-shot submission checks remain required. Live acceptance of this change remains pending.

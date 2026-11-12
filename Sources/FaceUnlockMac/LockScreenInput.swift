@@ -32,7 +32,7 @@ struct SecureInputTarget {
 
 @MainActor
 struct LockScreenInput {
-    func inspectTarget() throws -> SecureInputTarget {
+    private func focusedLoginwindow() throws -> AXUIElement {
         guard AXIsProcessTrusted() else { throw InputError.accessibility }
         let system = AXUIElementCreateSystemWide()
         guard let app = element(system, kAXFocusedApplicationAttribute) else { throw InputError.target }
@@ -40,7 +40,16 @@ struct LockScreenInput {
         guard AXUIElementGetPid(app, &pid) == .success, pid > 0,
               NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.apple.loginwindow",
               isAppleLoginwindow(pid: pid) else { throw InputError.target }
-        guard let field = element(system, kAXFocusedUIElementAttribute) else { throw InputError.field }
+        return app
+    }
+
+    func inspectTarget() throws -> SecureInputTarget {
+        let app = try focusedLoginwindow()
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(app, &pid) == .success else { throw InputError.target }
+        let system = AXUIElementCreateSystemWide()
+        guard let field = element(app, kAXFocusedUIElementAttribute)
+                ?? element(system, kAXFocusedUIElementAttribute) else { throw InputError.field }
         var fieldPID: pid_t = 0
         guard AXUIElementGetPid(field, &fieldPID) == .success, fieldPID == pid,
               string(field, kAXRoleAttribute) == kAXTextFieldRole as String,
@@ -49,6 +58,44 @@ struct LockScreenInput {
               boolean(field, kAXEnabledAttribute) == true else { throw InputError.field }
         // Intentionally never read AXValue, selected text, or contents of the password field.
         return SecureInputTarget(pid: pid, field: field)
+    }
+
+    /// Run before face capture so waiting for focus never ages a successful match.
+    /// Only the already focused, signature-verified Apple loginwindow is inspected.
+    func prepareTarget() throws {
+        if (try? inspectTarget()) != nil { return }
+        let app = try focusedLoginwindow()
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(app, &pid) == .success else { throw InputError.target }
+        var pending = [app]
+        var visited = 0
+        var truncated = false
+        var candidates: [AXUIElement] = []
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.3
+        while !pending.isEmpty, visited < 128, ProcessInfo.processInfo.systemUptime < deadline {
+            let node = pending.removeLast()
+            visited += 1
+            var owner: pid_t = 0
+            guard AXUIElementGetPid(node, &owner) == .success, owner == pid else { continue }
+            if string(node, kAXRoleAttribute) == kAXTextFieldRole as String,
+               string(node, kAXSubroleAttribute) == kAXSecureTextFieldSubrole as String,
+               boolean(node, kAXEnabledAttribute) == true {
+                candidates.append(node)
+            }
+            if let children = attribute(node, kAXChildrenAttribute) as? [AXUIElement] {
+                let capacity = max(0, 128 - visited - pending.count)
+                if children.count > capacity { truncated = true }
+                pending.append(contentsOf: children.prefix(capacity))
+            }
+        }
+        // Ambiguous or incomplete trees cannot select a password destination.
+        guard !truncated, pending.isEmpty, candidates.count == 1 else { throw InputError.field }
+        let current = try focusedLoginwindow()
+        guard CFEqual(current, app),
+              AXUIElementSetAttributeValue(candidates[0], kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success else {
+            throw InputError.field
+        }
+        _ = try inspectTarget()
     }
 
     func submit(_ password: Data, to target: SecureInputTarget, stillAuthorized: () -> Bool) throws {

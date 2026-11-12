@@ -28,6 +28,7 @@ struct LockScreenFlowServices {
     var supportsExperimentalUnlock = false
     var authorizeCredentials: () async throws -> Void = {}
     var inputPermissionGranted: () -> Bool = { true }
+    var prepareInput: () throws -> Void = {}
     var finishCamera: () async -> Void = {}
     var captureDiagnostics: () -> LockScreenCaptureDiagnostics = { LockScreenCaptureDiagnostics() }
     var saveDiagnostic: (LockScreenDiagnosticReport) -> Void = { _ in }
@@ -296,6 +297,19 @@ final class LockScreenFlowModel: ObservableObject {
             try current.beginScan(now: services.now(), snapshot: services.snapshot(), uptime: services.uptime())
             attempt = current
             phase = .scanning; record("Looking for your face…")
+            if shouldSubmit {
+                record("Waiting for the lock-screen password field…")
+                let inputDeadline = services.now() + 3
+                for poll in 0...30 {
+                    try Task.checkCancellation(); try checkScanning()
+                    do { try services.prepareInput(); break }
+                    catch let error as InputError where error == .target || error == .field {
+                        guard poll < 30, services.now() < inputDeadline else { throw error }
+                        try await Task.sleep(for: .milliseconds(100))
+                    }
+                }
+                record("Looking for your face…")
+            }
             let result = try await services.scan(template, current.id, { [weak self] in
                 guard let self else { throw CancellationError() }
                 try self.checkScanning()
