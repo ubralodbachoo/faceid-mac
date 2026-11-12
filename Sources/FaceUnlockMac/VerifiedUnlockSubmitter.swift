@@ -4,18 +4,31 @@ import FaceUnlockCore
 
 /// Shared one-shot input for verified evidence or an explicitly opted-in experimental permit.
 @MainActor
-public struct VerifiedUnlockSubmitter {
+public final class VerifiedUnlockSubmitter {
     private let vault: CredentialVault
     private let input = LockScreenInput()
+    private var preparedTarget: SecureInputTarget?
 
     public init(vault: CredentialVault) { self.vault = vault }
 
-    public func prepareInput() throws { try input.prepareTarget() }
+    public var inputDiagnostic: InputTargetDiagnostic { LockScreenInput.diagnostic }
+
+    public func revealPasswordPrompt() throws { try input.revealPasswordPrompt() }
+
+    public func prepareInput() throws {
+        preparedTarget = nil
+        preparedTarget = try input.prepareTarget()
+    }
+
+    public func clearPreparedTarget() { preparedTarget = nil }
 
     public func submit(attempt: inout FaceUnlockAttempt, verification: UnlockVerification,
                        isSuspended: () -> Bool) throws {
         guard !isSuspended() else { throw FaceUnlockAttemptError.session }
-        let target = try input.inspectTarget()
+        defer { preparedTarget = nil }
+        // Revalidate the prepared field directly if AX focus attributes are unavailable;
+        // repeated tree walks must not consume the fresh match's input budget.
+        let target = try input.inspectTarget(preferred: preparedTarget)
         let snapshot = MacSessionReader().read()
         let uptime = ProcessInfo.processInfo.systemUptime
         try attempt.consume(now: ContinuousTime.now, verification: verification,

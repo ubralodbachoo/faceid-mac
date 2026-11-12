@@ -9,7 +9,9 @@ swift build --disable-sandbox -c debug
 bin_dir="$(swift build --disable-sandbox -c debug --show-bin-path)"
 app="$PWD/build/Face Unlock.app"
 mkdir -p "$app/Contents/MacOS"
-cp "$bin_dir/FaceUnlock" "$app/Contents/MacOS/FaceUnlock"
+# Replace the executable inode instead of modifying pages of a running build.
+cp "$bin_dir/FaceUnlock" "$app/Contents/MacOS/.FaceUnlock.new"
+mv -f "$app/Contents/MacOS/.FaceUnlock.new" "$app/Contents/MacOS/FaceUnlock"
 cp scripts/Info.plist "$app/Contents/Info.plist"
 mkdir -p "$app/Contents/Resources"
 if [[ -d Models/ArcFace.mlpackage ]]; then

@@ -2,7 +2,7 @@ import Foundation
 
 /// Diagnostic policy only. These engineering cutoffs are NOT calibrated authentication thresholds.
 public enum FaceComparisonPolicy {
-    public static let identifier = "top3-median12-diagnostic-v4"
+    public static let identifier = "top3-median12-diagnostic-v5"
     public static let similarCutoff = 0.50
     public static let differentCutoff = 0.40
     public static let requiredFrames = 12
@@ -10,6 +10,14 @@ public enum FaceComparisonPolicy {
     public static let minimumSpacing = 0.15
     public static let minimumDuration = 1.65
     public static let maximumGap = 0.60
+}
+
+/// Short windows are for desktop evaluation only; unlock always uses standard.
+public enum FaceComparisonMode: String, CaseIterable, Sendable {
+    case standard, shortEvaluation
+    public var requiredFrames: Int { self == .standard ? FaceComparisonPolicy.requiredFrames : 6 }
+    public var requiredAgreement: Int { self == .standard ? FaceComparisonPolicy.requiredAgreement : 5 }
+    public var minimumDuration: Double { self == .standard ? FaceComparisonPolicy.minimumDuration : 0.75 }
 }
 
 public enum FaceComparisonOutcome: String, Sendable {
@@ -30,6 +38,7 @@ public struct FaceComparisonResult: Sendable, CustomStringConvertible, CustomDeb
 /// Retains scalar scores and bounds only. No frames or probe embeddings survive observe().
 public struct FaceComparisonWindow: CustomStringConvertible, CustomDebugStringConvertible {
     private let template: EnrollmentTemplate
+    private let mode: FaceComparisonMode
     private var scores: [Double] = []
     private var times: [Double] = []
     private var lastTime: Double?
@@ -40,9 +49,16 @@ public struct FaceComparisonWindow: CustomStringConvertible, CustomDebugStringCo
     public var description: String { "FaceComparisonWindow(frames: \(count), biometric data: redacted)" }
     public var debugDescription: String { description }
 
-    public init(template: EnrollmentTemplate) throws {
+    public init(template: EnrollmentTemplate, mode: FaceComparisonMode = .standard) throws {
         guard template.format == .continuousVideo else { throw EnrollmentError.incompatible }
-        self.template = template
+        self.template = template; self.mode = mode
+    }
+
+    /// Admit only frames that can contribute, before expensive image analysis.
+    /// Invalid/backward timestamps still reach observe() so it can invalidate old evidence.
+    public func shouldAnalyze(at time: Double) -> Bool {
+        guard let lastTime, time.isFinite, time > lastTime else { return true }
+        return time - lastTime + 1e-9 >= FaceComparisonPolicy.minimumSpacing
     }
 
     public mutating func interrupt() {
@@ -82,27 +98,28 @@ public struct FaceComparisonWindow: CustomStringConvertible, CustomDebugStringCo
             if time - lastTime > FaceComparisonPolicy.maximumGap { interrupt() }
             else if time - lastTime + 1e-9 < FaceComparisonPolicy.minimumSpacing { return nil }
         }
-        if let previousBounds, let bounds = metrics.faceBounds {
-            let oldArea = previousBounds.width * previousBounds.height
-            let newArea = bounds.width * bounds.height
-            if abs(bounds.x + bounds.width / 2 - previousBounds.x - previousBounds.width / 2) > 0.12 ||
-                abs(bounds.y + bounds.height / 2 - previousBounds.y - previousBounds.height / 2) > 0.12 ||
-                newArea / oldArea > 1.8 || oldArea / newArea > 1.8 { interrupt() }
-        }
+        if let previousBounds, let bounds = metrics.faceBounds,
+           !FaceTrackContinuity.isContinuous(from: previousBounds, to: bounds) { interrupt() }
         let score = try similarity(for: embedding)
+        if let previousScore = scores.last,
+           (previousScore >= FaceComparisonPolicy.similarCutoff && score < FaceComparisonPolicy.differentCutoff) ||
+           (previousScore < FaceComparisonPolicy.differentCutoff && score >= FaceComparisonPolicy.similarCutoff) {
+            // Do not carry the owner's votes into a different face's window.
+            interrupt()
+        }
         lastTime = time; previousBounds = metrics.faceBounds
         scores.append(score); times.append(time); result = nil
         // A bounded rolling window must satisfy BOTH frame count and elapsed camera time.
-        if scores.count > FaceComparisonPolicy.requiredFrames { scores.removeFirst(); times.removeFirst() }
-        guard scores.count == FaceComparisonPolicy.requiredFrames,
-              let firstTime = times.first, time - firstTime + 1e-9 >= FaceComparisonPolicy.minimumDuration else { return nil }
+        if scores.count > mode.requiredFrames { scores.removeFirst(); times.removeFirst() }
+        guard scores.count == mode.requiredFrames,
+              let firstTime = times.first, time - firstTime + 1e-9 >= mode.minimumDuration else { return nil }
         let ordered = scores.sorted()
         let middle = ordered.count / 2
         let median = (ordered[middle - 1] + ordered[middle]) / 2
         let above = scores.filter { $0 >= FaceComparisonPolicy.similarCutoff }.count
         let below = scores.filter { $0 < FaceComparisonPolicy.differentCutoff }.count
-        let outcome: FaceComparisonOutcome = median >= FaceComparisonPolicy.similarCutoff && above >= FaceComparisonPolicy.requiredAgreement ? .similar :
-            (median < FaceComparisonPolicy.differentCutoff && below >= FaceComparisonPolicy.requiredAgreement ? .different : .inconclusive)
+        let outcome: FaceComparisonOutcome = score >= FaceComparisonPolicy.similarCutoff && median >= FaceComparisonPolicy.similarCutoff && above >= mode.requiredAgreement ? .similar :
+            (median < FaceComparisonPolicy.differentCutoff && below >= mode.requiredAgreement ? .different : .inconclusive)
         let completed = FaceComparisonResult(outcome: outcome, medianSimilarity: median,
                                              minimumSimilarity: ordered[0], maximumSimilarity: ordered[ordered.count - 1],
                                              aboveCutoff: above, frameCount: scores.count)

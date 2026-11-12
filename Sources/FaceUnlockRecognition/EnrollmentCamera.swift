@@ -12,93 +12,129 @@ public enum EnrollmentCameraError: Error, LocalizedError {
     }
 }
 
-/// Single-use, bounded camera capture. No audio, recording output, or disk-backed image is created.
-/// Mutable session state is confined to queue; image conversion/throttling to frameQueue.
+/// Retains configuration between captures. The sensor runs only during an active capture.
+/// All session, delegate and lease mutations run on the same queue.
+public final class EnrollmentCameraSession: @unchecked Sendable {
+    let queue = DispatchQueue(label: "org.faceunlock.camera.session")
+    let session = AVCaptureSession()
+    fileprivate let context = CIContext(options: [.cacheIntermediates: false])
+    private var output: AVCaptureVideoDataOutput?
+    private var active: EnrollmentCamera?
+    public init() {}
+
+    func start(_ camera: EnrollmentCamera) {
+        queue.async { [self] in
+            guard !camera.stopped else { return }
+            guard active == nil else { camera.complete(EnrollmentCameraError.unavailable); return }
+            do {
+                guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
+                    throw EnrollmentCameraError.unavailable
+                }
+                if output == nil {
+                    guard let device = AVCaptureDevice.default(for: .video) else { throw EnrollmentCameraError.unavailable }
+                    let input = try AVCaptureDeviceInput(device: device)
+                    let candidate = AVCaptureVideoDataOutput()
+                    candidate.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+                    candidate.alwaysDiscardsLateVideoFrames = true
+                    session.beginConfiguration()
+                    defer { session.commitConfiguration() }
+                    session.sessionPreset = session.canSetSessionPreset(.hd1280x720) ? .hd1280x720 : .vga640x480
+                    guard session.canAddInput(input), session.canAddOutput(candidate) else { throw EnrollmentCameraError.unavailable }
+                    session.addInput(input); session.addOutput(candidate)
+                    if let connection = candidate.connection(with: .video), connection.isVideoMirroringSupported {
+                        connection.automaticallyAdjustsVideoMirroring = false
+                        connection.isVideoMirrored = false
+                    }
+                    output = candidate
+                }
+                active = camera
+                output?.setSampleBufferDelegate(camera, queue: queue)
+                session.startRunning()
+                queue.asyncAfter(deadline: .now() + 8) { [weak self, weak capture = camera] in
+                    guard let self, let capture, active === capture, !capture.receivedFrame else { return }
+                    finish(capture, error: EnrollmentCameraError.timeout)
+                }
+                queue.asyncAfter(deadline: .now() + 180) { [weak self, weak capture = camera] in
+                    guard let self, let capture, active === capture else { return }
+                    finish(capture, error: EnrollmentCameraError.timeout)
+                }
+            } catch { finish(camera, error: EnrollmentCameraError.unavailable) }
+        }
+    }
+
+    func finish(_ camera: EnrollmentCamera, error: (any Error)? = nil) {
+        // An old stream's cancellation/timeout can never stop a later capture.
+        if active === camera {
+            output?.setSampleBufferDelegate(nil, queue: nil)
+            session.stopRunning()
+            active = nil
+        }
+        camera.complete(error)
+    }
+}
+
+/// One fresh bounded stream per capture, backed by a reusable configured session.
 public final class EnrollmentCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
     public let frames: AsyncThrowingStream<CGImage, any Error>
     private let continuation: AsyncThrowingStream<CGImage, any Error>.Continuation
-    private let queue = DispatchQueue(label: "org.faceunlock.enrollment.camera")
-    private let frameQueue = DispatchQueue(label: "org.faceunlock.enrollment.frames")
-    private let context = CIContext(options: [.cacheIntermediates: false])
-    public let previewSession = AVCaptureSession()
-    private var stopped = false
+    private let backend: EnrollmentCameraSession
+    private let minimumFrameInterval: Double
+    public var previewSession: AVCaptureSession { backend.session }
+    fileprivate var stopped = false
+    fileprivate var receivedFrame = false
     private var started = false
-    private var receivedFrame = false
     private var lastFrameTime = -Double.infinity
 
     public static func requestPermission() async -> Bool {
         await AVCaptureDevice.requestAccess(for: .video)
     }
 
-    public override init() {
+    public override convenience init() { self.init(session: EnrollmentCameraSession()) }
+
+    public init(session: EnrollmentCameraSession, minimumFrameInterval: Double = 0.09) {
+        backend = session
+        self.minimumFrameInterval = max(0, minimumFrameInterval)
         let pair = AsyncThrowingStream<CGImage, any Error>.makeStream(bufferingPolicy: .bufferingNewest(1))
-        frames = pair.stream
-        continuation = pair.continuation
+        frames = pair.stream; continuation = pair.continuation
         super.init()
         continuation.onTermination = { [weak self] _ in self?.stop() }
     }
 
     public func start() {
-        queue.async { [self] in
-            guard !self.stopped, !self.started else { return }
-            self.started = true
-            do {
-                guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized,
-                      let device = AVCaptureDevice.default(for: .video) else { throw EnrollmentCameraError.unavailable }
-                let session = self.previewSession
-                session.beginConfiguration()
-                session.sessionPreset = session.canSetSessionPreset(.hd1280x720) ? .hd1280x720 : .vga640x480
-                let input = try AVCaptureDeviceInput(device: device)
-                let output = AVCaptureVideoDataOutput()
-                output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
-                output.alwaysDiscardsLateVideoFrames = true
-                output.setSampleBufferDelegate(self, queue: self.frameQueue)
-                guard session.canAddInput(input), session.canAddOutput(output) else { throw EnrollmentCameraError.unavailable }
-                session.addInput(input); session.addOutput(output)
-                if let connection = output.connection(with: .video), connection.isVideoMirroringSupported {
-                    connection.automaticallyAdjustsVideoMirroring = false
-                    connection.isVideoMirrored = false
-                }
-                session.commitConfiguration()
-                session.startRunning()
-                self.queue.asyncAfter(deadline: .now() + 8) { [weak self] in
-                    guard let self, !self.receivedFrame else { return }
-                    self.finish(EnrollmentCameraError.timeout)
-                }
-                self.queue.asyncAfter(deadline: .now() + 180) { [weak self] in self?.finish(EnrollmentCameraError.timeout) }
-            } catch { self.finish(EnrollmentCameraError.unavailable) }
+        backend.queue.async { [self] in
+            guard !started, !stopped else { return }
+            started = true
+            backend.start(self)
         }
     }
 
-    public func stop() { queue.async { self.finish(nil) } }
+    public func stop() {
+        backend.queue.async { [self] in backend.finish(self) }
+    }
 
     public func stopAndWait() async {
         await withCheckedContinuation { continuation in
-            queue.async {
-                self.finish(nil)
-                self.frameQueue.async { continuation.resume() }
+            backend.queue.async { [self] in
+                backend.finish(self)
+                continuation.resume()
             }
         }
     }
 
-    private func finish(_ error: (any Error)?) {
+    fileprivate func complete(_ error: (any Error)?) {
         guard !stopped else { return }
         stopped = true
-        previewSession.stopRunning()
-        previewSession.outputs.compactMap { $0 as? AVCaptureVideoDataOutput }.forEach { $0.setSampleBufferDelegate(nil, queue: nil) }
         continuation.finish(throwing: error)
     }
 
     public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard !stopped else { return }
         let time = ProcessInfo.processInfo.systemUptime
-        // The native preview layer runs independently at the camera's rate. Analysis receives
-        // a bounded latest-frame stream at up to 10 Hz, with no unbounded processing backlog.
-        guard time - lastFrameTime >= 0.09 else { return }
+        guard time - lastFrameTime >= minimumFrameInterval else { return }
         lastFrameTime = time
-        guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        // createCGImage materializes a bounded frame. Neither CMSampleBuffer nor CVPixelBuffer is retained.
-        guard let image = Self.makeImage(from: buffer, context: context) else { return }
-        queue.async { self.receivedFrame = true }
+        guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+              let image = Self.makeImage(from: buffer, context: backend.context) else { return }
+        receivedFrame = true
         continuation.yield(image)
     }
 

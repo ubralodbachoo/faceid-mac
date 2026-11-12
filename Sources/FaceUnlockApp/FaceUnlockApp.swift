@@ -45,6 +45,7 @@ final class AppModel: ObservableObject {
         manualTest = ManualUnlockController(monitor: sessionMonitor, vault: vault)
         let scanner = LockScreenFaceScanner()
         let reports = LockScreenReportStore()
+        let indicator = lockIndicator
         let monitor = sessionMonitor
         let credentials = automaticCredentials
         let manualCredentials = vault
@@ -57,9 +58,13 @@ final class AppModel: ObservableObject {
             services: LockScreenFlowServices(
                 available: { !manual.isArmed && !manualCredentials.isBusy && !enrollment.isBusy && !enrollment.canSave && !comparison.isBusy },
                 suspended: { monitor.isSuspended },
-                prepare: { try await scanner.prepare() },
-                scan: { try await scanner.scan(template: $0, attemptID: $1, check: $2) },
-                stopCamera: { scanner.stop() }, credentialsReady: { credentials.sessionIsValid && credentials.hasCredential },
+                prepare: {
+                    // Prepare the decorative bridge before the next lock.
+                    indicator.prepareForLockScreen()
+                    try await scanner.prepare()
+                },
+                scan: { try await scanner.scan(template: $0, attemptID: $1, check: $2, readyToReturn: $3) },
+                stopCamera: { scanner.stop(); submitter.clearPreparedTarget() }, credentialsReady: { credentials.sessionIsValid && credentials.hasCredential },
                 revokeCredentials: { credentials.lock() },
                 submit: { attempt, verification in
                     try submitter.submit(attempt: &attempt, verification: verification, isSuspended: { monitor.isSuspended })
@@ -67,7 +72,9 @@ final class AppModel: ObservableObject {
                 authorizeCredentials: { try await credentials.authorizeExperimentalFaceUnlock(acknowledgingPhotoRisk: true) },
                 inputPermissionGranted: { AXIsProcessTrusted() },
                 prepareInput: { try submitter.prepareInput() },
-                finishCamera: { await scanner.finish() }, captureDiagnostics: { scanner.diagnostics },
+                revealInput: { try submitter.revealPasswordPrompt() },
+                finishCamera: { await scanner.finish() }, indicatorDiagnostics: { indicator.diagnostics }, captureDiagnostics: { scanner.diagnostics },
+                inputDiagnostic: { submitter.inputDiagnostic },
                 saveDiagnostic: { reports.save($0) }))
         let lockScreen = lockScreen
         setup = SetupFlowModel(services: SetupFlowServices(

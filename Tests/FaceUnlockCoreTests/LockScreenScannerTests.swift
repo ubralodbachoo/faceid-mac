@@ -61,12 +61,12 @@ private final class HiddenScanFixture {
         if let deadline, time >= deadline { throw FaceUnlockAttemptError.expired }
     }
 
-    func send(_ count: Int) async throws {
+    func send(_ count: Int, interval: Double = 0.2) async throws {
         let context = try XCTUnwrap(CGContext(data: nil, width: 16, height: 16, bitsPerComponent: 8,
             bytesPerRow: 64, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
         let image = try XCTUnwrap(context.makeImage())
         for _ in 0..<count {
-            time += 0.2
+            time += interval
             camera.continuation.yield(image)
             for _ in 0..<40 { await Task.yield() }
         }
@@ -74,6 +74,73 @@ private final class HiddenScanFixture {
 }
 
 final class LockScreenScannerTests: XCTestCase {
+    @MainActor
+    func testFieldWaitContinuesCameraAndRequiresNewOwnerEvidenceAfterFaceSwitch() async throws {
+        let fixture = try HiddenScanFixture()
+        var fieldReady = false
+        var readyChecks = 0
+        try await fixture.scanner.prepare()
+        let scan = Task {
+            try await fixture.scanner.scan(template: fixture.template, attemptID: UUID(), check: fixture.check,
+                readyToReturn: { readyChecks += 1; return fieldReady })
+        }
+        for _ in 0..<100 { await Task.yield() }
+        try await fixture.send(12)
+        XCTAssertFalse(fixture.camera.stopped)
+        XCTAssertEqual(fixture.scanner.diagnostics.passwordFieldWaitFrames, 1)
+        fixture.score = 0.1
+        fieldReady = true
+        try await fixture.send(1)
+        XCTAssertFalse(fixture.camera.stopped)
+        XCTAssertEqual(readyChecks, 1, "Nonmatching new face must not request input using an old match")
+        fixture.score = 1
+        try await fixture.send(11)
+        XCTAssertFalse(fixture.camera.stopped)
+        try await fixture.send(1)
+        fixture.camera.stop()
+        let result = try await scan.value
+        XCTAssertEqual(result.verification.observedAt, fixture.time, accuracy: 1e-6)
+        XCTAssertEqual(readyChecks, 2)
+    }
+
+    @MainActor
+    func testReadinessWorkCannotReturnExpiredEvidence() async throws {
+        let fixture = try HiddenScanFixture()
+        var delay = true
+        try await fixture.scanner.prepare()
+        let scan = Task {
+            try await fixture.scanner.scan(template: fixture.template, attemptID: UUID(), check: fixture.check,
+                readyToReturn: {
+                    if delay { fixture.time += 1; delay = false }
+                    return true
+                })
+        }
+        for _ in 0..<100 { await Task.yield() }
+        try await fixture.send(12)
+        XCTAssertFalse(fixture.camera.stopped)
+        XCTAssertEqual(fixture.scanner.diagnostics.rejectionCounts["staleAnalysis"], 1)
+        try await fixture.send(12)
+        fixture.camera.stop()
+        let result = try await scan.value
+        XCTAssertEqual(result.verification.observedAt, fixture.time, accuracy: 1e-6)
+    }
+
+    @MainActor
+    func testSchedulingSkipsEarlyFramesBeforeAnalysisAndReportsTiming() async throws {
+        let fixture = try HiddenScanFixture()
+        try await fixture.scanner.prepare()
+        let scan = Task { try await fixture.scanner.scan(template: fixture.template, attemptID: UUID(), check: fixture.check) }
+        for _ in 0..<100 { await Task.yield() }
+        try await fixture.send(56, interval: 1.0 / 30)
+        fixture.camera.stop()
+        let result = try await scan.value
+        XCTAssertEqual(result.comparison, .similar)
+        XCTAssertEqual(fixture.analysisCount, 12)
+        XCTAssertEqual(fixture.scanner.diagnostics.scheduledOutFrames, 44)
+        XCTAssertNotNil(fixture.scanner.diagnostics.cameraStartupMilliseconds)
+        XCTAssertEqual(try XCTUnwrap(fixture.scanner.diagnostics.scanMilliseconds), 11.0 / 6 * 1000, accuracy: 0.01)
+    }
+
     @MainActor
     func testHiddenScanUsesTwelveFramesAndNeverPromotesComparisonToAuthentication() async throws {
         let fixture = try HiddenScanFixture()
@@ -111,6 +178,8 @@ final class LockScreenScannerTests: XCTestCase {
         let result = try await scan.value
         XCTAssertEqual(result.comparison, .similar)
         XCTAssertEqual(fixture.analysisCount, 18)
+        XCTAssertEqual(fixture.scanner.diagnostics.rejectionCounts["noFace"], 1)
+        XCTAssertEqual(fixture.scanner.diagnostics.peakUsableFrames, 12)
     }
 
     @MainActor

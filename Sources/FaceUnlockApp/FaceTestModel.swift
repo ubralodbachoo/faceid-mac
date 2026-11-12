@@ -17,6 +17,19 @@ extension EnrollmentVault: FaceTestTemplateReading {}
 
 enum FaceTestPhase { case idle, authorizing, preparing, capturing, finished, failed }
 
+enum EvaluationPresentation: String, CaseIterable {
+    case genuine = "My face", other = "Another person", print = "Printed photo"
+    case screen = "Photo on screen", video = "Video replay"
+}
+
+struct FaceWindowTrial: Identifiable {
+    let id = UUID()
+    let mode: FaceComparisonMode
+    let presentation: EvaluationPresentation
+    let outcome: FaceComparisonOutcome?
+    let cameraMilliseconds: Double?
+}
+
 @MainActor
 final class FaceTestModel: ObservableObject {
     @Published private(set) var phase: FaceTestPhase = .idle
@@ -37,6 +50,18 @@ final class FaceTestModel: ObservableObject {
     var averageCameraMilliseconds: Double? {
         completedCameraTimes.isEmpty ? nil : completedCameraTimes.reduce(0, +) / Double(completedCameraTimes.count)
     }
+    @Published private(set) var evaluationMode = FaceComparisonMode.standard
+    @Published var evaluationPresentation = EvaluationPresentation.genuine
+    @Published private(set) var evaluationTrials: [FaceWindowTrial] = []
+    var requiredFrames: Int { evaluationMode.requiredFrames }
+
+    func setEvaluationMode(_ mode: FaceComparisonMode) {
+        guard !isBusy else { return }
+        evaluationMode = mode
+        result = nil; sampleCount = 0; latestSimilarity = nil
+        completedCameraTimes.removeAll(); failedCameraTests = 0
+    }
+
     static let captureTimeout = 15.0
     @Published private(set) var secondsRemaining = Int(captureTimeout)
     @Published private(set) var cameraSettingsNeeded = false
@@ -56,7 +81,7 @@ final class FaceTestModel: ObservableObject {
     private var observers: [FaceTestNotificationToken] = []
 
     init(vault: any FaceTestTemplateReading = EnrollmentVault(modelIdentifier: ArcFaceContract.identifier),
-         session: MacEnrollmentSession = MacEnrollmentSession(), services: EnrollmentCaptureServices = .live,
+         session: MacEnrollmentSession = MacEnrollmentSession(), services: EnrollmentCaptureServices = .comparison,
          notifications: NotificationCenter? = nil) {
         self.vault = vault; self.session = session; self.services = services
         for event in [NSWorkspace.willSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
@@ -86,6 +111,8 @@ final class FaceTestModel: ObservableObject {
         cameraSettingsNeeded = false; cancellationMessage = nil; captureStarted = nil; decisionStarted = nil
         isBusy = true; phase = .authorizing
         status = "Use Touch ID or your Mac password to open the saved face. The camera test follows."
+        let runMode = evaluationMode
+        let presentation = evaluationPresentation
         operation = Task {
             do {
                 try await session.waitForForeground()
@@ -109,7 +136,7 @@ final class FaceTestModel: ObservableObject {
                 try Task.checkCancellation()
                 try await session.waitForForeground()
                 try checkLease()
-                let completed = try await capture(template: template, analyze: analyze)
+                let completed = try await capture(template: template, analyze: analyze, mode: runMode)
                 try Task.checkCancellation()
                 try session.check()
                 try checkLease()
@@ -123,6 +150,10 @@ final class FaceTestModel: ObservableObject {
                     completedCameraTimes.append(scanMilliseconds)
                     if completedCameraTimes.count > 20 { completedCameraTimes.removeFirst() }
                 }
+                evaluationTrials.append(FaceWindowTrial(mode: runMode, presentation: presentation,
+                    outcome: completed.result.outcome,
+                    cameraMilliseconds: (cameraStartupMilliseconds ?? 0) + (scanMilliseconds ?? 0)))
+                if evaluationTrials.count > 100 { evaluationTrials.removeFirst() }
                 phase = .finished
                 switch completed.result.outcome {
                 case .similar:
@@ -131,6 +162,11 @@ final class FaceTestModel: ObservableObject {
                 case .inconclusive: status = "The scores are borderline or inconsistent. Try again in even light."
                 }
             } catch {
+                if captureStarted != nil {
+                    evaluationTrials.append(FaceWindowTrial(mode: runMode, presentation: presentation,
+                        outcome: nil, cameraMilliseconds: nil))
+                    if evaluationTrials.count > 100 { evaluationTrials.removeFirst() }
+                }
                 if decisionStarted != nil {
                     recordAcquisitionSummary()
                     if phase != .idle { failedCameraTests += 1 }
@@ -152,8 +188,8 @@ final class FaceTestModel: ObservableObject {
         let medianMilliseconds: Double
     }
 
-    private func capture(template: EnrollmentTemplate, analyze: EnrollmentImageAnalyzer) async throws -> Completed {
-        var window = try FaceComparisonWindow(template: template)
+    private func capture(template: EnrollmentTemplate, analyze: EnrollmentImageAnalyzer, mode: FaceComparisonMode) async throws -> Completed {
+        var window = try FaceComparisonWindow(template: template, mode: mode)
         var timings: [Double] = []
         var firstFrameTime: Double?
         let capture = services.makeCamera()
@@ -179,6 +215,7 @@ final class FaceTestModel: ObservableObject {
                     decisionStarted = time
                     cameraStartupMilliseconds = max(0, (time - (captureStarted ?? time)) * 1000)
                 }
+                guard window.shouldAnalyze(at: time) else { continue }
                 do {
                     analyzedFrameCount += 1
                     let analysis = try await analyze(image)
@@ -202,10 +239,10 @@ final class FaceTestModel: ObservableObject {
                     let completed = try window.observe(analysis.embedding, metrics: metrics, at: time)
                     if window.count < before { timings.removeAll() }
                     timings.append((services.now() - time) * 1000)
-                    if timings.count > FaceComparisonPolicy.requiredFrames { timings.removeFirst() }
+                    if timings.count > mode.requiredFrames { timings.removeFirst() }
                     update(window)
                     lastAcquisitionFeedback = "Input usable."
-                    status = "Comparing your face… \(sampleCount) of \(FaceComparisonPolicy.requiredFrames) usable frames."
+                    status = "Comparing your face… \(sampleCount) of \(mode.requiredFrames) usable frames."
                     if let completed {
                         let ordered = timings.sorted()
                         let milliseconds = ordered.isEmpty ? 0 : ordered[ordered.count / 2]
@@ -240,7 +277,7 @@ final class FaceTestModel: ObservableObject {
 
     private func recordAcquisitionSummary() {
         guard acquisitionSummary == nil else { return }
-        acquisitionSummary = "\(analyzedFrameCount) frames analyzed; \(sampleCount) of \(FaceComparisonPolicy.requiredFrames) in the last usable burst; \(rejectedFrameCount) rejected. Last feedback: \(lastAcquisitionFeedback)"
+        acquisitionSummary = "\(analyzedFrameCount) frames analyzed; \(sampleCount) of \(requiredFrames) in the last usable burst; \(rejectedFrameCount) rejected. Last feedback: \(lastAcquisitionFeedback)"
         if let decisionStarted { scanMilliseconds = max(0, (services.now() - decisionStarted) * 1000) }
     }
 

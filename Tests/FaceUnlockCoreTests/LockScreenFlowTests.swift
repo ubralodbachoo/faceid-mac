@@ -54,6 +54,7 @@ private final class LockFixture {
     var credentialAuthenticationError: (any Error)?
     var inputPermission = true
     var prepareInput: (() throws -> Void)?
+    var promptReveals = 0
     var reports: [LockScreenDiagnosticReport] = []
     var finishCamera: (() async -> Void)?
     var finishCalls = 0
@@ -68,10 +69,15 @@ private final class LockFixture {
             suspended: { [unowned self] in suspended }, prepare: { [unowned self] in
                 preparations += 1
                 if let preparationError { throw preparationError }
-            }, scan: { [unowned self] _, id, check in
+            }, scan: { [unowned self] _, id, check, ready in
                 try check(); scanCount += 1
                 if let scan { return try await scan(id) }
-                return outcome(id)
+                for _ in 0..<200 {
+                    try check()
+                    if try ready() { return outcome(id) }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                throw FaceUnlockAttemptError.expired
             }, stopCamera: { [unowned self] in stopped += 1 },
             credentialsReady: { [unowned self] in credentialsReady }, revokeCredentials: { [unowned self] in revoked += 1 },
             submit: { [unowned self] attempt, evidence in
@@ -87,6 +93,7 @@ private final class LockFixture {
                 credentialsReady = true
             }, inputPermissionGranted: { [unowned self] in inputPermission },
             prepareInput: { [unowned self] in try prepareInput?() },
+            revealInput: { [unowned self] in promptReveals += 1 },
             finishCamera: { [unowned self] in finishCalls += 1; if let finishCamera { await finishCamera() } },
             captureDiagnostics: { [unowned self] in capture },
             saveDiagnostic: { [unowned self] in reports.append($0) })
@@ -453,13 +460,15 @@ final class LockScreenFlowTests: XCTestCase {
     }
 
     @MainActor
-    func testPasswordFieldBecomesReadyBeforeCameraStartsWithoutRetryingSubmission() async throws {
+    func testPasswordFieldWaitKeepsCameraScanActiveWithoutRetryingSubmission() async throws {
         let fixture = try LockFixture(supportsExperimentalUnlock: true)
         defer { fixture.model.disableAutomaticScanning() }
         var checks = 0
         fixture.prepareInput = {
             checks += 1
-            XCTAssertEqual(fixture.scanCount, 0)
+            XCTAssertEqual(fixture.scanCount, 1)
+            if checks == 1 { fixture.time += 4 } // Exceeds the former three-second pre-camera timeout.
+            if checks > 1 { XCTAssertEqual(fixture.model.phase, .waitingForPasswordField) }
             if checks < 3 { throw InputError.field }
         }
         try await enableExperimental(fixture)
@@ -467,12 +476,13 @@ final class LockScreenFlowTests: XCTestCase {
         fixture.lock = .locked; fixture.model.automaticTick()
         try await waitUntil { fixture.submissions == 1 && !fixture.model.isBusy }
         XCTAssertEqual(checks, 3)
+        XCTAssertEqual(fixture.promptReveals, 1)
         XCTAssertEqual(fixture.scanCount, 1)
         XCTAssertEqual(fixture.model.phase, .unlocked)
     }
 
     @MainActor
-    func testSessionLossWhileWaitingForPasswordFieldCannotStartCameraOrSubmit() async throws {
+    func testSessionLossWhileWaitingForPasswordFieldStopsScanWithoutSubmitting() async throws {
         let fixture = try LockFixture(supportsExperimentalUnlock: true)
         defer { fixture.model.disableAutomaticScanning() }
         var checks = 0
@@ -484,7 +494,7 @@ final class LockScreenFlowTests: XCTestCase {
         try await enableExperimental(fixture)
         fixture.lock = .locked; fixture.model.automaticTick()
         try await waitUntil { checks > 0 && !fixture.model.isBusy }
-        XCTAssertEqual(fixture.scanCount, 0)
+        XCTAssertEqual(fixture.scanCount, 1)
         XCTAssertEqual(fixture.submissions, 0)
         XCTAssertNotEqual(fixture.model.phase, .unlocked)
     }

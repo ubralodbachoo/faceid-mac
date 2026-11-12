@@ -31,9 +31,9 @@ struct FaceTestView: View {
             .accessibilityLabel(model.phase == .capturing ? "Live mirrored camera for face comparison" : "Camera is off")
 
             if model.phase == .capturing {
-                ProgressView(value: Double(model.sampleCount), total: Double(FaceComparisonPolicy.requiredFrames))
+                ProgressView(value: Double(model.sampleCount), total: Double(model.requiredFrames))
                     .frame(width: 270)
-                Text("\(model.sampleCount) of \(FaceComparisonPolicy.requiredFrames) usable frames · \(model.secondsRemaining)s remaining")
+                Text("\(model.sampleCount) of \(model.requiredFrames) usable frames · \(model.secondsRemaining)s remaining")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -88,9 +88,29 @@ struct FaceTestView: View {
                 }
             }.controlSize(.large)
 
+            DisclosureGroup("Window evaluation (camera test only)") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Picker("Matching window", selection: Binding(get: { model.evaluationMode }, set: model.setEvaluationMode)) {
+                        Text("Current · 12 frames").tag(FaceComparisonMode.standard)
+                        Text("Candidate · 6 frames").tag(FaceComparisonMode.shortEvaluation)
+                    }.disabled(model.isBusy)
+                    Picker("Presentation", selection: $model.evaluationPresentation) {
+                        ForEach(EvaluationPresentation.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }.disabled(model.isBusy)
+                    Text("The candidate never changes automatic unlocking. Test each presentation with both windows. A photo/video match is a spoof acceptance, not a successful authentication.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ForEach(Array(model.evaluationTrials.suffix(12).reversed())) { trial in
+                        Text("\(trial.mode == .standard ? "12f" : "6f") · \(trial.presentation.rawValue) · \(trial.outcome?.rawValue ?? "incomplete/canceled") · \(trial.cameraMilliseconds.map { String(format: "%.2fs", $0 / 1000) } ?? "—")")
+                            .font(.caption.monospacedDigit())
+                    }
+                    Text("Last 100 trials kept in memory only. Time includes camera startup and scan; macOS authorization is excluded.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.padding(.top, 8)
+            }.frame(maxWidth: 480)
+
             VStack(spacing: 6) {
                 Text("Experimental recognition test. This does not unlock your Mac.")
-                Text("The comparison finishes when 12 usable frames are collected. Scans stop after 15s if incomplete.")
+                Text("The comparison finishes when \(model.requiredFrames) usable frames are collected. Scans stop after 15s if incomplete.")
                 Text("Liveness is unverified. A photo or video may also match.")
                 Text("Processed on this Mac. Images and test scores are not saved.")
             }

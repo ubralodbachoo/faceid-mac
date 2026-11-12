@@ -6,7 +6,7 @@ import FaceUnlockCore
 import FaceUnlockMac
 
 enum LockScreenPhase: String, Equatable, Codable, Sendable {
-    case idle, preparing, waitingForLock, scanning, submitting, awaitingDesktop, unlocked, fallback, canceled
+    case idle, preparing, waitingForLock, scanning, waitingForPasswordField, submitting, awaitingDesktop, unlocked, fallback, canceled
 }
 
 @MainActor
@@ -18,7 +18,7 @@ struct LockScreenFlowServices {
     var available: () -> Bool = { true }
     var suspended: () -> Bool
     var prepare: () async throws -> Void
-    var scan: (EnrollmentTemplate, UUID, @escaping @MainActor () throws -> Void) async throws -> LockScreenScanResult
+    var scan: (EnrollmentTemplate, UUID, @escaping @MainActor () throws -> Void, @escaping @MainActor () throws -> Bool) async throws -> LockScreenScanResult
     var stopCamera: () -> Void
     var credentialsReady: () -> Bool
     var revokeCredentials: () -> Void
@@ -29,8 +29,11 @@ struct LockScreenFlowServices {
     var authorizeCredentials: () async throws -> Void = {}
     var inputPermissionGranted: () -> Bool = { true }
     var prepareInput: () throws -> Void = {}
+    var revealInput: () throws -> Void = {}
     var finishCamera: () async -> Void = {}
+    var indicatorDiagnostics: () -> LockScreenIndicatorDiagnostics? = { nil }
     var captureDiagnostics: () -> LockScreenCaptureDiagnostics = { LockScreenCaptureDiagnostics() }
+    var inputDiagnostic: () -> InputTargetDiagnostic? = { nil }
     var saveDiagnostic: (LockScreenDiagnosticReport) -> Void = { _ in }
 }
 
@@ -297,22 +300,32 @@ final class LockScreenFlowModel: ObservableObject {
             try current.beginScan(now: services.now(), snapshot: services.snapshot(), uptime: services.uptime())
             attempt = current
             phase = .scanning; record("Looking for your face…")
-            if shouldSubmit {
-                record("Waiting for the lock-screen password field…")
-                let inputDeadline = services.now() + 3
-                for poll in 0...30 {
-                    try Task.checkCancellation(); try checkScanning()
-                    do { try services.prepareInput(); break }
-                    catch let error as InputError where error == .target || error == .field {
-                        guard poll < 30, services.now() < inputDeadline else { throw error }
-                        try await Task.sleep(for: .milliseconds(100))
-                    }
-                }
-                record("Looking for your face…")
-            }
+            var promptRevealAttempted = false
             let result = try await services.scan(template, current.id, { [weak self] in
                 guard let self else { throw CancellationError() }
                 try self.checkScanning()
+            }, { [weak self] in
+                guard let self else { throw CancellationError() }
+                try self.checkScanning()
+                guard self.shouldSubmit else { return true }
+                do {
+                    try self.services.prepareInput()
+                    return true
+                } catch let error as InputError where error == .target || error == .field {
+                    if self.phase != .waitingForPasswordField {
+                        self.phase = .waitingForPasswordField
+                        self.record("Face matched. Waiting for the Mac password field; keeping the camera active for a fresh match.")
+                    }
+                    if !promptRevealAttempted {
+                        do {
+                            try self.services.revealInput()
+                            promptRevealAttempted = true
+                        } catch let revealError as InputError where revealError == .target || revealError == .field {
+                            // loginwindow may still be transitioning; keep analyzing fresh frames.
+                        }
+                    }
+                    return false
+                }
             })
             let age = (services.now() - result.verification.observedAt) * 1000
             evidenceAgeMilliseconds = age.isFinite && age >= 0 ? age : nil
@@ -421,7 +434,7 @@ final class LockScreenFlowModel: ObservableObject {
     private func checkScanning() throws {
         try Task.checkCancellation()
         let templateValid = isAutomaticAttempt ? automaticScanningEnabled && automaticTemplate != nil : vault.sessionIsValid
-        guard phase == .scanning, !automaticSleeping, !services.suspended(), templateValid, let attempt else {
+        guard (phase == .scanning || phase == .waitingForPasswordField), !automaticSleeping, !services.suspended(), templateValid, let attempt else {
             throw FaceUnlockAttemptError.session
         }
         try attempt.checkTime(services.now())
@@ -433,7 +446,7 @@ final class LockScreenFlowModel: ObservableObject {
         guard isBusy else { return }
         do {
             if phase == .waitingForLock { try checkWaiting() }
-            if phase == .scanning { try checkScanning() }
+            if phase == .scanning || phase == .waitingForPasswordField { try checkScanning() }
         } catch {
             operation?.cancel(); services.stopCamera(); vault.lock()
             if automaticUnlockEnabled && !services.credentialsReady() { clearAutomaticSession() }
@@ -465,7 +478,8 @@ final class LockScreenFlowModel: ObservableObject {
             mode: activeMode, stage: origin, outcome: phase, failure: self.failure,
             inputConsumed: inputConsumed, passwordSubmitted: submittedAt != nil,
             evidenceAgeMilliseconds: evidenceAgeMilliseconds,
-            capture: attempt == nil ? LockScreenCaptureDiagnostics() : services.captureDiagnostics()))
+            capture: attempt == nil ? LockScreenCaptureDiagnostics() : services.captureDiagnostics(),
+            indicator: services.indicatorDiagnostics(), inputTarget: attempt == nil ? nil : services.inputDiagnostic()))
     }
     private func record(_ message: String) {
         status = message

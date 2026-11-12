@@ -26,6 +26,29 @@ enum LockScreenIndicatorGeometry {
     }
 }
 
+struct LockScreenIndicatorDiagnostics: Codable, Sendable {
+    var attachmentAttempts = 0
+    var attachmentSucceeded = false
+    var bridgeAvailable = false
+    var bridgeInitializationFailure: String?
+    var windowAttachmentFailure: String?
+}
+
+/// Refresh after ordering: AppKit ordering/space transitions may undo earlier delegation.
+@MainActor
+struct LockScreenOverlayDelivery {
+    private(set) var delegated = false
+    mutating func refresh(locked: Bool, orderFront: () -> Void, attach: () -> Bool, detach: () -> Void) {
+        orderFront()
+        if locked { delegated = attach() || delegated }
+        else if delegated { detach(); delegated = false; orderFront() }
+    }
+    mutating func hide(detach: () -> Void, orderOut: () -> Void) {
+        if delegated { detach(); delegated = false }
+        orderOut()
+    }
+}
+
 /// No key window, pointer interception, activation, video view, or password-field replacement.
 @MainActor
 final class LockScreenIndicator: NSObject {
@@ -34,7 +57,9 @@ final class LockScreenIndicator: NSObject {
     private var observation: AnyCancellable?
     private var visiblePhase = LockScreenPhase.idle
     private var visibleCaption: String?
-    private var delegated = false
+    private var delivery = LockScreenOverlayDelivery()
+    private var visibilityRefresh: Task<Void, Never>?
+    private(set) var diagnostics = LockScreenIndicatorDiagnostics()
 
     override init() {
         super.init()
@@ -48,6 +73,8 @@ final class LockScreenIndicator: NSObject {
         }
     }
 
+    func prepareForLockScreen() { LockScreenWindowBridge.prepare() }
+
     func preview() {
         show(.scanning)
         dismiss(after: 3)
@@ -55,7 +82,9 @@ final class LockScreenIndicator: NSObject {
 
     private func update(_ phase: LockScreenPhase, caption: String?) {
         switch phase {
-        case .scanning, .submitting, .awaitingDesktop: show(phase)
+        case .scanning, .waitingForPasswordField, .submitting, .awaitingDesktop:
+            if phase == .scanning && visiblePhase != .scanning { diagnostics = LockScreenIndicatorDiagnostics() }
+            show(phase)
         case .unlocked:
             show(phase); dismiss(after: 1.4)
         case .fallback:
@@ -93,19 +122,43 @@ final class LockScreenIndicator: NSObject {
         }
         panel.setFrame(frame, display: false)
         panel.contentView = NSHostingView(rootView: LockScreenIndicatorView(phase: phase, safeTop: screen.safeAreaInsets.top, width: frame.width, failureCaption: caption))
-        panel.orderFrontRegardless()
-        if MacSessionReader().read().assessment(at: ProcessInfo.processInfo.systemUptime, maximumAge: 0.5) == .observedLocked {
-            if !delegated { delegated = LockScreenWindowBridge.shared?.attach(panel) == true }
-        } else if delegated {
-            LockScreenWindowBridge.shared?.detach(panel); delegated = false
-            panel.orderFrontRegardless()
+        // Lay out/composite before moving into the lock-screen space.
+        panel.contentView?.layoutSubtreeIfNeeded()
+        panel.displayIfNeeded()
+        refreshVisibility()
+        if visibilityRefresh == nil {
+            visibilityRefresh = Task { [weak self] in
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+                    guard let self else { return }
+                    self.refreshVisibility()
+                }
+            }
         }
+    }
+
+    private func refreshVisibility() {
+        guard let panel, visiblePhase != .idle else { return }
+        let locked = MacSessionReader().read().assessment(at: ProcessInfo.processInfo.systemUptime, maximumAge: 0.5) == .observedLocked
+        delivery.refresh(locked: locked, orderFront: { panel.orderFrontRegardless() }, attach: {
+            diagnostics.attachmentAttempts += 1
+            let bridge = LockScreenWindowBridge.shared
+            diagnostics.bridgeAvailable = bridge != nil
+            diagnostics.bridgeInitializationFailure = LockScreenWindowBridge.initializationFailure
+            let attached = bridge?.attach(panel) == true
+            diagnostics.windowAttachmentFailure = bridge?.lastAttachmentFailure
+            diagnostics.attachmentSucceeded = diagnostics.attachmentSucceeded || attached
+            return attached
+        }, detach: { LockScreenWindowBridge.shared?.detach(panel) })
     }
 
     func hide() {
         dismissal?.cancel(); dismissal = nil
-        if delegated, let panel { LockScreenWindowBridge.shared?.detach(panel); delegated = false }
-        panel?.orderOut(nil); visiblePhase = .idle; visibleCaption = nil
+        visibilityRefresh?.cancel(); visibilityRefresh = nil
+        if let panel {
+            delivery.hide(detach: { LockScreenWindowBridge.shared?.detach(panel) }, orderOut: { panel.orderOut(nil) })
+        }
+        visiblePhase = .idle; visibleCaption = nil
     }
 
     private func dismiss(after seconds: Double) {
@@ -140,6 +193,7 @@ private struct LockScreenIndicatorView: View {
         switch phase {
         case .unlocked: "checkmark.circle"
         case .fallback: "lock.circle"
+        case .waitingForPasswordField: "lock"
         case .submitting, .awaitingDesktop: "lock.open"
         default: "faceid"
         }
@@ -149,6 +203,7 @@ private struct LockScreenIndicatorView: View {
         switch phase {
         case .unlocked: "Desktop observed"
         case .fallback: failureCaption ?? "Use password or Touch ID"
+        case .waitingForPasswordField: "Waiting for password field"
         case .submitting: "Submitting password"
         case .awaitingDesktop: "Waiting for the desktop"
         default: "Looking for your face"
@@ -170,8 +225,8 @@ private struct LockScreenIndicatorView: View {
                         .offset(y: reduceMotion ? 0 : (scanning ? 38 : -38))
                 }
               }
-              if phase == .fallback, let failureCaption {
-                  Text(failureCaption).font(.system(size: 11, weight: .medium))
+              if phase == .waitingForPasswordField || phase == .fallback {
+                  Text(phase == .waitingForPasswordField ? "Preparing password field" : failureCaption ?? "Use password or Touch ID").font(.system(size: 11, weight: .medium))
                       .foregroundStyle(.orange).multilineTextAlignment(.center)
                       .lineLimit(2).padding(.horizontal, 12)
               }

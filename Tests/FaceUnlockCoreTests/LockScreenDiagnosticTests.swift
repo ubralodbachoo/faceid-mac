@@ -23,10 +23,29 @@ final class LockScreenDiagnosticTests: XCTestCase {
         XCTAssertEqual(json["mode"] as? String, "experimental-unlock")
         XCTAssertEqual(Set(json.keys), ["schema", "recordedAt", "appVersion", "mode", "stage", "outcome", "failure", "inputConsumed", "passwordSubmitted", "evidenceAgeMilliseconds", "capture"])
         let capture = try XCTUnwrap(json["capture"] as? [String: Any])
-        XCTAssertEqual(Set(capture.keys), ["analyzedFrames", "rejectedFrames", "usableFrames", "lastIssue"])
+        XCTAssertEqual(Set(capture.keys), ["passwordFieldWaitFrames", "scheduledOutFrames", "comparisonCounts", "rejectionCounts", "peakUsableFrames", "analyzedFrames", "rejectedFrames", "usableFrames", "lastIssue"])
         let attributes = try FileManager.default.attributesOfItem(atPath: store.file.path)
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["last-lock-attempt.json"])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), ["last-failed-lock-attempt.json", "last-lock-attempt.json"])
+    }
+
+    func testLaterSuccessDoesNotEraseLatestFailedAttempt() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = LockScreenReportStore(directory: directory)
+        store.save(report(.identity))
+        store.save(LockScreenDiagnosticReport(schema: 1, recordedAt: Date(), appVersion: "test",
+            mode: "experimental-unlock", stage: .awaitingDesktop, outcome: .unlocked, failure: nil,
+            inputConsumed: true, passwordSubmitted: true, evidenceAgeMilliseconds: 30,
+            capture: LockScreenCaptureDiagnostics()))
+        await store.waitForPendingWrites()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let failed = try decoder.decode(LockScreenDiagnosticReport.self,
+            from: Data(contentsOf: directory.appendingPathComponent("last-failed-lock-attempt.json")))
+        XCTAssertEqual(failed.failure, .identity)
+        let latest = try decoder.decode(LockScreenDiagnosticReport.self, from: Data(contentsOf: store.file))
+        XCTAssertEqual(latest.outcome, .unlocked)
     }
 
     func testReportDoesNotFollowSymlinkOrOverwriteItsTarget() async throws {

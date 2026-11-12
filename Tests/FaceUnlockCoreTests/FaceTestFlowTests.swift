@@ -113,6 +113,42 @@ final class FaceTestFlowTests: XCTestCase {
     }
 
     @MainActor
+    func testCameraFailureBeforeFirstFrameStillCountsAsIncompleteEvaluation() async throws {
+        let fixture = try ComparisonFixture()
+        fixture.model.start()
+        await waitUntil { fixture.model.phase == .capturing }
+        fixture.camera.stop()
+        await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.model.evaluationTrials.count, 1)
+        XCTAssertNil(fixture.model.evaluationTrials.first?.outcome)
+        XCTAssertNil(fixture.model.evaluationTrials.first?.cameraMilliseconds)
+    }
+
+    @MainActor
+    func testShortWindowIsDesktopOnlyAndRecordsPresentationWithoutMixingModes() async throws {
+        let fixture = try ComparisonFixture()
+        fixture.model.setEvaluationMode(.shortEvaluation)
+        fixture.model.evaluationPresentation = .screen
+        fixture.model.start()
+        await waitUntil { fixture.model.phase == .capturing }
+        fixture.model.setEvaluationMode(.standard)
+        XCTAssertEqual(fixture.model.evaluationMode, .shortEvaluation, "Cannot change evidence policy during capture")
+        try await fixture.send(6)
+        await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.model.result?.frameCount, 6)
+        let trial = try XCTUnwrap(fixture.model.evaluationTrials.last)
+        XCTAssertEqual(trial.mode, .shortEvaluation)
+        XCTAssertEqual(trial.presentation, .screen)
+        XCTAssertEqual(trial.outcome, .similar, "Matching screen-photo embeddings are not liveness evidence")
+        XCTAssertNotNil(trial.cameraMilliseconds)
+        fixture.model.setEvaluationMode(.standard)
+        XCTAssertNil(fixture.model.result)
+        XCTAssertEqual(fixture.model.requiredFrames, 12)
+        XCTAssertTrue(fixture.model.completedCameraTimes.isEmpty)
+        XCTAssertEqual(fixture.model.evaluationTrials.count, 1)
+    }
+
+    @MainActor
     func testReadAuthorizationThenLiveComparisonStopsCameraBeforeShowingResult() async throws {
         for score in [0.8, 0.1, 0.45] {
             let fixture = try ComparisonFixture()

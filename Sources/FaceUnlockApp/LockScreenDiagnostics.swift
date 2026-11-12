@@ -9,6 +9,15 @@ enum LockScreenCaptureIssue: String, Codable, Sendable {
 }
 
 struct LockScreenCaptureDiagnostics: Codable, Sendable {
+    var passwordFieldWaitFrames = 0
+    var scheduledOutFrames = 0
+    var cameraStartupMilliseconds: Double?
+    var meanAnalysisMilliseconds: Double?
+    var scanMilliseconds: Double?
+    var lastQualityHint: String?
+    var comparisonCounts: [String: Int] = [:]
+    var rejectionCounts: [String: Int] = [:]
+    var peakUsableFrames = 0
     var analyzedFrames = 0
     var rejectedFrames = 0
     var usableFrames = 0
@@ -79,6 +88,8 @@ struct LockScreenDiagnosticReport: Codable, Sendable {
     let passwordSubmitted: Bool
     let evidenceAgeMilliseconds: Double?
     let capture: LockScreenCaptureDiagnostics
+    var indicator: LockScreenIndicatorDiagnostics? = nil
+    var inputTarget: InputTargetDiagnostic? = nil
 }
 
 /// Serial, atomic, private storage; disk I/O never runs on the fresh-evidence/password-input path.
@@ -92,14 +103,20 @@ final class LockScreenReportStore: @unchecked Sendable {
     }
 
     func save(_ report: LockScreenDiagnosticReport) {
-        queue.async { [self] in try? write(report) }
+        queue.async { [self] in
+            try? write(report)
+            if report.outcome == .fallback, report.mode == "experimental-unlock" {
+                try? write(report, filename: "last-failed-lock-attempt.json")
+            }
+        }
     }
 
     func waitForPendingWrites() async {
         await withCheckedContinuation { continuation in queue.async { continuation.resume() } }
     }
 
-    private func write(_ report: LockScreenDiagnosticReport) throws {
+    private func write(_ report: LockScreenDiagnosticReport, filename: String = "last-lock-attempt.json") throws {
+        let file = directory.appendingPathComponent(filename)
         let manager = FileManager.default
         if !manager.fileExists(atPath: directory.path) {
             try manager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
