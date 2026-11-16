@@ -12,7 +12,8 @@ public enum FaceComparisonPolicy {
     public static let maximumGap = 0.60
 }
 
-/// Short windows are for desktop evaluation only; unlock always uses standard.
+/// Standard remains the default. The six-frame candidate is explicitly selected for
+/// desktop evaluation and the experimental lock-screen trial; it is not calibrated authentication.
 public enum FaceComparisonMode: String, CaseIterable, Sendable {
     case standard, shortEvaluation
     public var requiredFrames: Int { self == .standard ? FaceComparisonPolicy.requiredFrames : 6 }

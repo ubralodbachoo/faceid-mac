@@ -13,12 +13,14 @@ struct LockScreenScanResult {
 final class LockScreenFaceScanner {
     private let services: EnrollmentCaptureServices
     private let now: () -> Double
+    private let mode: FaceComparisonMode
     private var camera: (any EnrollmentCapturing)?
     private var analyze: EnrollmentImageAnalyzer?
     private(set) var diagnostics = LockScreenCaptureDiagnostics()
 
-    init(services: EnrollmentCaptureServices = .comparison, now: @escaping () -> Double = { ContinuousTime.now }) {
-        self.services = services; self.now = now
+    init(services: EnrollmentCaptureServices = .comparison, mode: FaceComparisonMode = .standard,
+         now: @escaping () -> Double = { ContinuousTime.now }) {
+        self.services = services; self.mode = mode; self.now = now
     }
 
     func prepare() async throws {
@@ -40,7 +42,8 @@ final class LockScreenFaceScanner {
         guard let analyze else { throw RecognitionError.reference }
         try check()
         diagnostics = LockScreenCaptureDiagnostics()
-        var window = try FaceComparisonWindow(template: template)
+        diagnostics.requiredMatchFrames = mode.requiredFrames
+        var window = try FaceComparisonWindow(template: template, mode: mode)
         let capture = services.makeCamera()
         camera = capture
         let startedAt = now()

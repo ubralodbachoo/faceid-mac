@@ -35,6 +35,7 @@ struct LockScreenFlowServices {
     var captureDiagnostics: () -> LockScreenCaptureDiagnostics = { LockScreenCaptureDiagnostics() }
     var inputDiagnostic: () -> InputTargetDiagnostic? = { nil }
     var saveDiagnostic: (LockScreenDiagnosticReport) -> Void = { _ in }
+    var desktopFocused: () -> Bool = { false }
 }
 
 @MainActor
@@ -62,6 +63,7 @@ final class LockScreenFlowModel: ObservableObject {
     private var automaticAttempts = 0
     private var isAutomaticAttempt = false
     private var desktopReturnObserved = false
+    private var unlockSignalPending = false
     private var inputConsumed = false
     private var activeMode = "off"
     private var evidenceAgeMilliseconds: Double?
@@ -94,11 +96,17 @@ final class LockScreenFlowModel: ObservableObject {
 
     private func handleEvent(_ name: Notification.Name) {
         switch name {
+        case NSNotification.Name("com.apple.screenIsLocked"):
+            unlockSignalPending = false
+            desktopReturnObserved = false
+            automaticTick()
         case NSWorkspace.screensDidSleepNotification:
             screensSleeping = true
             services.stopCamera()
-            cancel(reason: "The screen turned off. Camera stopped.")
-            if inputConsumed { clearAutomaticSession() }
+            if phase != .unlocked {
+                cancel(reason: "The screen turned off. Camera stopped.")
+                if inputConsumed { clearAutomaticSession() }
+            }
         case NSWorkspace.screensDidWakeNotification:
             if screensSleeping { automaticLockHandled = false }
             screensSleeping = false
@@ -122,12 +130,19 @@ final class LockScreenFlowModel: ObservableObject {
         case NSNotification.Name("com.apple.screenIsUnlocked"):
             let observed = services.snapshot()
             let assessment = observed.assessment(at: services.uptime(), maximumAge: 0.5)
+            // The notification can precede the lock dictionary update. Retain it only
+            // for this submitted attempt; a later locked notification invalidates it.
+            if phase == .awaitingDesktop, submittedAt != nil, inputConsumed,
+               observed.processUserID == userID, !services.suspended(),
+               assessment == .observedLocked || assessment == .lockUnknown || assessment == .unlocked {
+                unlockSignalPending = true
+            }
             if observed.processUserID == userID, !services.suspended(),
                assessment == .unlocked || assessment == .lockUnknown {
                 automaticLockHandled = false
                 automaticAttempts = 0
                 if phase == .awaitingDesktop, submittedAt != nil { desktopReturnObserved = true }
-                else if isAutomaticAttempt { cancel(reason: "The Mac was unlocked. Camera stopped.") }
+                else if isAutomaticAttempt, submittedAt == nil { cancel(reason: "The Mac was unlocked. Camera stopped.") }
             }
         default: automaticTick()
         }
@@ -236,7 +251,7 @@ final class LockScreenFlowModel: ObservableObject {
         case .unlocked:
             automaticLockHandled = false
             automaticAttempts = 0
-            if isAutomaticAttempt, phase != .awaitingDesktop { cancel(reason: "The Mac was unlocked. Camera stopped.") }
+            if isAutomaticAttempt, submittedAt == nil { cancel(reason: "The Mac was unlocked. Camera stopped.") }
             return
         case .observedLocked: break
         default: return // Missing observations cannot start a scan or reset the lock-cycle latch.
@@ -269,7 +284,7 @@ final class LockScreenFlowModel: ObservableObject {
     private func launch(automaticTemplate preparedTemplate: EnrollmentTemplate? = nil) {
         activeMode = preparedTemplate != nil && automaticUnlockEnabled ? "experimental-unlock" : submissionEnabled ? "verified-test" : "scan-only"
         failure = nil; evidenceAgeMilliseconds = nil
-        vault.lock(); submittedAt = nil; desktopReturnObserved = false; inputConsumed = false
+        vault.lock(); submittedAt = nil; desktopReturnObserved = false; unlockSignalPending = false; inputConsumed = false
         isAutomaticAttempt = preparedTemplate != nil
         isBusy = true; phase = .preparing
         if !isAutomaticAttempt { record("Use Touch ID or your Mac password to open your saved face for this test.") }
@@ -406,10 +421,10 @@ final class LockScreenFlowModel: ObservableObject {
                 guard !services.suspended(), snapshot.processUserID == userID else { throw FaceUnlockAttemptError.session }
                 switch snapshot.assessment(at: services.uptime(), maximumAge: 0.5) {
                 case .unlocked:
-                    finish(.unlocked, "Desktop observed after one password submission."); return
+                    confirmDesktopReturn("Desktop observed after one password submission."); return
                 case .lockUnknown:
-                    if desktopReturnObserved {
-                        finish(.unlocked, "Desktop return reported after one password submission."); return
+                    if desktopReturnObserved || unlockSignalPending || services.desktopFocused() {
+                        confirmDesktopReturn("Desktop return observed after one password submission."); return
                     }
                 case .observedLocked: break
                 default: throw FaceUnlockAttemptError.session
@@ -437,6 +452,13 @@ final class LockScreenFlowModel: ObservableObject {
         if !automaticUnlockEnabled { services.revokeCredentials() }
         watchdog?.cancel(); watchdog = nil
         finish(.canceled, reason, failure: .canceled)
+    }
+
+    private func confirmDesktopReturn(_ message: String) {
+        automaticLockHandled = false
+        automaticAttempts = 0
+        unlockSignalPending = false
+        finish(.unlocked, message)
     }
 
     private func checkDesktop(requireForeground: Bool = true) throws {

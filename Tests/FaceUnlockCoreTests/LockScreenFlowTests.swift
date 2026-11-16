@@ -53,6 +53,7 @@ private final class LockFixture {
     var credentialAuthorizations = 0
     var credentialAuthenticationError: (any Error)?
     var inputPermission = true
+    var desktopFocused = false
     var prepareInput: (() throws -> Void)?
     var promptReveals = 0
     var revealInput: (() throws -> Void)?
@@ -98,7 +99,8 @@ private final class LockFixture {
             revealInput: { [unowned self] in try revealInput?(); promptReveals += 1 },
             finishCamera: { [unowned self] in finishCalls += 1; if let finishCamera { await finishCamera() } },
             captureDiagnostics: { [unowned self] in capture },
-            saveDiagnostic: { [unowned self] in reports.append($0) })
+            saveDiagnostic: { [unowned self] in reports.append($0) },
+            desktopFocused: { [unowned self] in desktopFocused })
         model = LockScreenFlowModel(vault: vault, services: services, userID: 501, notifications: notifications)
     }
 
@@ -728,6 +730,106 @@ final class LockScreenFlowTests: XCTestCase {
         try await waitUntil { !fixture.model.isBusy }
         XCTAssertEqual(fixture.model.phase, .unlocked)
         XCTAssertEqual(fixture.submissions, 1)
+    }
+
+    @MainActor
+    func testEarlyUnlockNotificationSurvivesDelayedLockFlagAndNextLockRuns() async throws {
+        let fixture = try LockFixture(supportsExperimentalUnlock: true)
+        defer { fixture.model.disableAutomaticScanning() }
+        try await enableExperimental(fixture)
+        for expected in 1...2 {
+            fixture.lock = .locked; fixture.model.automaticTick()
+            try await waitUntil { fixture.model.phase == .awaitingDesktop }
+            XCTAssertEqual(fixture.submissions, expected)
+            // The notification arrives while the dictionary still says locked.
+            fixture.notifications.post(name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)
+            for _ in 0..<100 { await Task.yield() }
+            XCTAssertEqual(fixture.model.phase, .awaitingDesktop)
+            fixture.lock = .unknown
+            try await waitUntil { !fixture.model.isBusy }
+            XCTAssertEqual(fixture.model.phase, .unlocked)
+            XCTAssertTrue(fixture.model.automaticUnlockEnabled)
+        }
+        XCTAssertEqual(fixture.scanCount, 2)
+        XCTAssertEqual(fixture.credentialAuthorizations, 1)
+    }
+
+    @MainActor
+    func testDesktopFocusConfirmsUnknownLockWithoutNotificationAndRearmsNextLock() async throws {
+        let fixture = try LockFixture(supportsExperimentalUnlock: true)
+        defer { fixture.model.disableAutomaticScanning() }
+        try await enableExperimental(fixture)
+        for expected in 1...2 {
+            fixture.desktopFocused = false
+            fixture.lock = .locked; fixture.model.automaticTick()
+            try await waitUntil { fixture.model.phase == .awaitingDesktop }
+            fixture.lock = .unknown
+            fixture.desktopFocused = true
+            try await waitUntil { !fixture.model.isBusy }
+            XCTAssertEqual(fixture.model.phase, .unlocked)
+            XCTAssertEqual(fixture.submissions, expected)
+            XCTAssertTrue(fixture.model.automaticUnlockEnabled)
+        }
+    }
+
+    @MainActor
+    func testNewLockNotificationInvalidatesPendingUnlockCompletion() async throws {
+        let fixture = try LockFixture(supportsExperimentalUnlock: true)
+        defer { fixture.model.disableAutomaticScanning() }
+        try await enableExperimental(fixture)
+        fixture.lock = .locked; fixture.model.automaticTick()
+        try await waitUntil { fixture.model.phase == .awaitingDesktop }
+        fixture.notifications.post(name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)
+        for _ in 0..<100 { await Task.yield() }
+        fixture.notifications.post(name: Notification.Name("com.apple.screenIsLocked"), object: nil)
+        for _ in 0..<100 { await Task.yield() }
+        fixture.lock = .unknown
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(fixture.model.phase, .awaitingDesktop)
+        fixture.time += 8
+        try await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.model.failure, .unconfirmed)
+    }
+
+    @MainActor
+    func testDesktopFocusCannotOverrideAnExplicitlyLockedSession() async throws {
+        let fixture = try LockFixture(supportsExperimentalUnlock: true)
+        defer { fixture.model.disableAutomaticScanning() }
+        try await enableExperimental(fixture)
+        fixture.lock = .locked; fixture.model.automaticTick()
+        try await waitUntil { fixture.model.phase == .awaitingDesktop }
+        fixture.desktopFocused = true
+        fixture.time += 8
+        try await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.model.failure, .unconfirmed)
+        XCTAssertFalse(fixture.model.automaticUnlockEnabled)
+    }
+
+    @MainActor
+    func testConfirmedUnlockSurvivesNotificationsWhileCameraCleanupIsPending() async throws {
+        let fixture = try LockFixture(supportsExperimentalUnlock: true)
+        defer { fixture.model.disableAutomaticScanning() }
+        var cleanup: CheckedContinuation<Void, Never>?
+        fixture.finishCamera = { await withCheckedContinuation { cleanup = $0 } }
+        fixture.autoDesktop = true
+        try await enableExperimental(fixture)
+        fixture.lock = .locked; fixture.model.automaticTick()
+        try await waitUntil { cleanup != nil }
+        XCTAssertEqual(fixture.model.phase, .unlocked)
+        fixture.model.automaticTick()
+        fixture.notifications.post(name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)
+        fixture.notifications.post(name: NSWorkspace.screensDidSleepNotification, object: nil)
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(fixture.model.phase, .unlocked)
+        XCTAssertTrue(fixture.model.automaticUnlockEnabled)
+        cleanup?.resume()
+        try await waitUntil { !fixture.model.isBusy }
+        fixture.finishCamera = nil
+        fixture.notifications.post(name: NSWorkspace.screensDidWakeNotification, object: nil)
+        for _ in 0..<100 { await Task.yield() }
+        fixture.lock = .locked; fixture.model.automaticTick()
+        try await waitUntil { fixture.submissions == 2 && !fixture.model.isBusy }
+        XCTAssertEqual(fixture.model.phase, .unlocked)
     }
 
     @MainActor

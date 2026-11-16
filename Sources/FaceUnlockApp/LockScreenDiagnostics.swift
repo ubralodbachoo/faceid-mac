@@ -9,6 +9,7 @@ enum LockScreenCaptureIssue: String, Codable, Sendable {
 }
 
 struct LockScreenCaptureDiagnostics: Codable, Sendable {
+    var requiredMatchFrames: Int?
     var passwordFieldWaitFrames = 0
     var scheduledOutFrames = 0
     var cameraStartupMilliseconds: Double?

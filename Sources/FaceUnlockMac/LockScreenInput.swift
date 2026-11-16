@@ -5,6 +5,21 @@ import Security
 import FaceUnlockCore
 
 public enum InputDiagnostics {
+    /// Completion observation only. This must never authorize credential access or input.
+    @MainActor public static func desktopApplicationFocused() -> Bool {
+        guard AXIsProcessTrusted() else { return false }
+        var value: CFTypeRef?
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, 0.1)
+        guard AXUIElementCopyAttributeValue(system, kAXFocusedApplicationAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return false }
+        let focused = value as! AXUIElement
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(focused, &pid) == .success,
+              let app = NSRunningApplication(processIdentifier: pid) else { return false }
+        return app.activationPolicy == .regular && app.bundleIdentifier != "com.apple.loginwindow"
+    }
+
     @MainActor public static func inspect() -> String {
         do { _ = try LockScreenInput().inspectTarget(); return "Verified Apple loginwindow secure field" }
         catch { return error.localizedDescription }

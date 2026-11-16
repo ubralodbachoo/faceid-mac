@@ -43,7 +43,7 @@ final class AppModel: ObservableObject {
     init(provider: any ReadinessProviding) {
         self.provider = provider
         manualTest = ManualUnlockController(monitor: sessionMonitor, vault: vault)
-        let scanner = LockScreenFaceScanner()
+        let scanner = LockScreenFaceScanner(mode: .shortEvaluation)
         let reports = LockScreenReportStore()
         let indicator = lockIndicator
         let monitor = sessionMonitor
@@ -75,7 +75,8 @@ final class AppModel: ObservableObject {
                 revealInput: { try submitter.revealPasswordPrompt() },
                 finishCamera: { await scanner.finish() }, indicatorDiagnostics: { indicator.diagnostics }, captureDiagnostics: { scanner.diagnostics },
                 inputDiagnostic: { submitter.inputDiagnostic },
-                saveDiagnostic: { reports.save($0) }))
+                saveDiagnostic: { reports.save($0) },
+                desktopFocused: { InputDiagnostics.desktopApplicationFocused() }))
         let lockScreen = lockScreen
         setup = SetupFlowModel(services: SetupFlowServices(
             permissionsGranted: {

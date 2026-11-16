@@ -12,7 +12,7 @@ The last lock-attempt report adds camera-startup time, mean completed-analysis t
 
 ## Desktop evaluation
 
-Turn off automatic face unlock, then open Tools → Test my face → Window evaluation. Select the window and presentation **before** starting each camera test. Current uses 12 frames/10 agreement/1.65 s. Candidate uses 6 frames/5 agreement/0.75 s; both retain the same score, quality, spacing and continuity cutoffs. The candidate is wired only to the desktop comparison, with no password submission capability.
+Turn off automatic face unlock, then open Tools → Test my face → Window evaluation. Select the window and presentation **before** starting each camera test. Current uses 12 frames/10 agreement/1.65 s. Candidate uses 6 frames/5 agreement/0.75 s; both retain the same score, quality, spacing and continuity cutoffs. The desktop comparison has no password submission capability. As of 0.12.8, the six-frame candidate is also explicitly selected for the experimental lock-screen trial at the owner’s request.
 
 Trial history retains up to 100 labeled outcomes and total camera-test times in memory. Time includes startup and scanning, excludes system authentication, and is not an end-to-end unlock measurement. Incomplete/canceled trials are retained with no completed duration. Changing windows clears the displayed per-mode average but retains labeled history. Restarting the app clears the history.
 
@@ -85,3 +85,25 @@ Experimental automatic mode gets at most three recognition attempts per lock cyc
 NSWorkspace screen-sleep notifications now stop the camera and cancel the in-flight operation independently of full system sleep. Screen wake can start a new scan only while attempts remain. A display sleep after input consumption revokes automatic unlocking rather than allowing another submission. Tests cover immediate nonmatch rejection with no prompt access, three distinct permits and the hard limit across display wake, owner recovery on a retry, late results after display sleep, and bounded timeout with inference cleanup before retry. Live display-sleep and three-attempt hardware acceptance remain pending.
 
 Validation: full suite executed 203 tests with 195 passed, eight opt-in integrations skipped and zero failures using native macOS framework access.
+
+
+## 0.12.8: six-frame experimental lock-screen trial
+
+At the owner's request, the app composition explicitly selects the existing six-frame candidate for lock-screen scanning: six quality frames, five agreeing, at least 0.75 seconds. The scanner and core window retain their 12-frame default for other callers; desktop evaluation retains both options. Similarity cutoffs, 150 ms sample spacing, newest-frame matching, quality gates, face continuity, fresh evidence, field verification, one-shot password input, three-attempt limit and display-sleep cancellation are unchanged. Existing enrolled templates remain compatible.
+
+The lock-attempt capture report adds optional requiredMatchFrames metadata so live trial reports identify the selected window. Scanner tests verify the earliest six-frame decision, rejection without prompt access for different/borderline input, and fresh owner evidence after detection loss or a face switch during prompt preparation. The output remains experimental identity evidence with liveness unavailable.
+
+Reducing the window does not guarantee a better or worse genuine success rate: fewer samples change both evidence duration and the agreement rule. Real speed, owner rejection and other-person acceptance need side-by-side trials with the 12-frame baseline under comparable lighting/pose. Photos/video remain a known unsupported threat model. No live accuracy equivalence or speedup is claimed by this build.
+
+Validation: 206 tests executed with 198 passed, eight opt-in integrations skipped and zero failures using native framework access. Live speed and success-rate measurements remain pending.
+
+
+## 0.12.9: desktop-return confirmation and repeated-lock cleanup
+
+The owner's 0.12.8 report records six-frame recognition and one password submission, followed by an unconfirmed desktop return. The owner reached the desktop, but the coordinator timed out and disabled automatic unlocking. This explains the missing next-lock scan; it does not establish a recognition failure.
+
+Unlock notifications received during a submitted attempt are now retained when the lock dictionary still reports locked, then reconciled against a fresh same-account unlocked/unknown observation. A newer lock notification invalidates that pending signal. If the unlock notification is absent, an unknown lock flag can be corroborated by Accessibility focus on a regular desktop application. This observation is used only for completion, never credential access or input authorization, and cannot override an explicitly locked report.
+
+Every confirmed desktop return resets the lock-cycle latch and retry count. Late unlock polling/notifications during camera cleanup no longer cancel a completed success. Display sleep after confirmed success no longer revokes the automatic session merely because the last attempt consumed input; unresolved input still revokes it. This lets the indicator receive its terminal success phase and dismiss normally. The six-frame trial is unchanged. Regression tests exercise the early-notification race, missing-notification desktop focus, repeated locks, pending-signal invalidation, explicit-lock rejection and display sleep during successful camera cleanup. Live repetition on the owner's Mac remains pending.
+
+Validation: 211 tests executed, 203 passed, eight opt-in tests skipped, zero failures with native macOS framework access.
