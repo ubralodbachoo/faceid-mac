@@ -348,7 +348,7 @@ final class LockScreenFlowModel: ObservableObject {
             try current.beginScan(now: services.now(), snapshot: services.snapshot(), uptime: services.uptime())
             attempt = current
             phase = .scanning; record("Looking for your face…")
-            var promptRevealedAt: Double?
+            var promptRevealed = false
             let result = try await services.scan(template, current.id, { [weak self] in
                 guard let self else { throw CancellationError() }
                 try self.checkScanning()
@@ -357,17 +357,15 @@ final class LockScreenFlowModel: ObservableObject {
                 try self.checkScanning()
                 guard self.shouldSubmit else { return true }
                 do {
-                    // AX can report a secure field before the lock-screen cover is dismissed.
-                    // Reveal once even when that field already appears focused, then allow the
-                    // animation to settle while the scanner continues collecting fresh evidence.
-                    guard let promptRevealedAt else {
+                    // AX can report a secure field behind the cover, so reveal once first.
+                    // Prepare in the same callback: a ready field needs neither a fixed
+                    // animation delay nor another camera frame before guarded submission.
+                    if !promptRevealed {
                         self.phase = .waitingForPasswordField
                         self.record("Face matched. Opening the Mac password field…")
                         try self.services.revealInput()
-                        promptRevealedAt = self.services.now()
-                        return false
+                        promptRevealed = true
                     }
-                    guard self.services.now() - promptRevealedAt >= 0.5 else { return false }
                     try self.checkScanning()
                     try self.services.prepareInput()
                     return true

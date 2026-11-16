@@ -487,7 +487,7 @@ final class LockScreenFlowTests: XCTestCase {
     }
 
     @MainActor
-    func testPromptOpensBeforePreparingEvenWhenSecureFieldIsAlreadyAvailable() async throws {
+    func testPromptOpeningAndReadyFieldSubmitWithoutWaitingForAnotherFrame() async throws {
         let fixture = try LockFixture(supportsExperimentalUnlock: true)
         defer { fixture.model.disableAutomaticScanning() }
         var revealedAt: Double?
@@ -500,7 +500,7 @@ final class LockScreenFlowTests: XCTestCase {
         fixture.prepareInput = {
             fieldChecks += 1
             XCTAssertEqual(fixture.promptReveals, 1)
-            XCTAssertGreaterThanOrEqual(fixture.time - (revealedAt ?? fixture.time), 0.5)
+            XCTAssertEqual(fixture.time, revealedAt, "Prepare immediately after opening the prompt")
         }
         try await enableExperimental(fixture)
         fixture.autoDesktop = true
@@ -509,6 +509,7 @@ final class LockScreenFlowTests: XCTestCase {
         XCTAssertEqual(fixture.promptReveals, 1)
         XCTAssertEqual(fieldChecks, 1)
         XCTAssertEqual(fixture.submissions, 1)
+        XCTAssertEqual(fixture.time, revealedAt, "A ready field must not require another camera frame")
         XCTAssertEqual(fixture.model.phase, .unlocked)
     }
 
@@ -531,7 +532,7 @@ final class LockScreenFlowTests: XCTestCase {
     }
 
     @MainActor
-    func testAccountChangeDuringPromptAnimationPreventsPasswordPreparation() async throws {
+    func testAccountChangeWhileOpeningPromptPreventsImmediatePasswordPreparation() async throws {
         let fixture = try LockFixture(supportsExperimentalUnlock: true)
         defer { fixture.model.disableAutomaticScanning() }
         var fieldChecks = 0

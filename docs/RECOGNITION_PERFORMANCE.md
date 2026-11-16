@@ -107,3 +107,14 @@ Unlock notifications received during a submitted attempt are now retained when t
 Every confirmed desktop return resets the lock-cycle latch and retry count. Late unlock polling/notifications during camera cleanup no longer cancel a completed success. Display sleep after confirmed success no longer revokes the automatic session merely because the last attempt consumed input; unresolved input still revokes it. This lets the indicator receive its terminal success phase and dismiss normally. The six-frame trial is unchanged. Regression tests exercise the early-notification race, missing-notification desktop focus, repeated locks, pending-signal invalidation, explicit-lock rejection and display sleep during successful camera cleanup. Live repetition on the owner's Mac remains pending.
 
 Validation: 211 tests executed, 203 passed, eight opt-in tests skipped, zero failures with native macOS framework access.
+
+
+## 0.12.10: continuous prompt opening and password entry
+
+The owner observed that Glance opens the password field and enters the password as one continuous action, while our app visibly pauses between them. The input-readiness callback now opens the cover once and immediately prepares the secure field. A ready field returns the current matching frame without the former 500 ms minimum wait or mandatory additional frame. The scanner still rejects evidence that becomes stale during preparation; field/target transitions keep scanning and retry only preparation after the opening key has been delivered. Account and cancellation checks run again immediately after revealing the prompt, before preparation. Password input remains one-shot and directed to verified Apple loginwindow.
+
+This changes scheduling, not macOS's animation duration. Accessibility can expose a focused field before the cover animation completes, so immediate input delivery during that animation is an experimental trial pending live acceptance. The existing opening Return retains its 40 ms hold. No global password input or repeated submission was introduced.
+
+Regression coverage verifies immediate preparation and submission without advancing to a new frame, single reveal across delayed field readiness, account loss during reveal, and stale-evidence rejection after readiness work. Live lock/unlock timing and successful delivery remain unmeasured for this build.
+
+Validation: 211 tests executed, 207 passed, four opt-in tests skipped, zero failures with native macOS framework access and the compiled Core ML model enabled.
