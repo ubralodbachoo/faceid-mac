@@ -55,3 +55,33 @@ Input reports preserve the original focused-element failure alongside tree-searc
 ### Live acceptance — November 12, 2026
 
 The owner tested 0.12.2 without typing or Touch ID and confirmed: “Notch appears and unlocks automatically.” The corresponding report records bridge available, successful window attachment, password submitted, unlocked outcome and no failure. The input field was ready through the system focus source, with zero password-field wait frames. Camera startup was 1,465 ms, scanning 2,154 ms and mean completed analysis 26.6 ms; these are separate stage measurements from one run, not an end-to-end benchmark. Six frames were rejected (one no-face and five quality), and the recorded quality hint requested more frontal light. This confirms the requested flow in one live owner test; it does not isolate the AX-tree fallback's contribution, establish broad reliability or replace genuine/impostor/photo/video evaluation.
+
+## 0.12.3: open the password prompt before input
+
+On November 16 the owner reported that opening the password prompt manually let face unlock complete. The previous reveal path ran only after field preparation failed and skipped its Space key if AX reported a focused secure field. It also delivered the wake key directly to the loginwindow PID, which may bypass the system's cover/user-activity handling.
+
+After a completed face match, the coordinator now reveals the prompt before field preparation, even if AX already reports a secure field. One fixed non-secret Space goes through the [HID entry to WindowServer](https://developer.apple.com/documentation/coregraphics/cgeventtaplocation/cghideventtap), after Accessibility, same-account locked-session and focused Apple loginwindow signature checks. This is a narrow change from the previous all-PID reveal path; password clearing, Unicode and Return still use PID-directed delivery with all existing guards. Any Space inserted into an already visible field is cleared by the existing submission routine.
+
+Capture continues through at least 300 ms of prompt animation and submission still needs newly analyzed matching evidence and a verified secure field within the original scan deadline. Target transitions can retry before the reveal key is sent; after it is sent, only field preparation retries. Password submission remains one-shot. Automated tests cover reveal-before-preparation even for an available field, animation delay, transition retries and account changes during the delay. Real hidden-prompt acceptance remains to be tested on the owner's Mac.
+
+Validation: 199 tests executed, 191 passed and eight opt-in integrations skipped, with zero failures outside the execution sandbox. The sandboxed full run had five native Vision/Core Image failures; the same suite passed with native-service access. The 0.12.3 development app was packaged and its code signature verified. No live keypress, password submission or lock cycle was performed during this change.
+
+
+## 0.12.4: Return opens the cover before password input
+
+The owner clarified that the remaining problem is the closed password field: manually pressing Return reveals it, after which the app enters the password and unlocks automatically. The 0.12.3 Space-based opening step did not resolve this. This is not evidence of a failed final submission Return.
+
+The pre-input reveal now sends one Return through the HID event stream, with a 40 ms key hold, before any saved password access. The coordinator then allows at least 500 ms for the prompt transition while collecting fresh face evidence. Password clearing, Unicode input and the final submission Return retain their existing PID-directed implementation. There is no retry after credential input. An already visible prompt may interpret the opening Return as a submission of its current contents; the app never repeats this opening key within the same attempt. Real closed-prompt acceptance of this version remains pending.
+
+
+## 0.12.6: bounded recognition retries and display sleep
+
+At the owner's request, the notch no longer displays “Unlocking” text. Opening the prompt, password entry and desktop confirmation use a blue face icon and small spinner; only the final result has an outcome caption.
+
+A completed different or borderline 12-frame window now fails immediately without invoking input readiness. The existing comparison count, agreement, quality, score and continuity requirements are unchanged. The coordinator limits recognition to six seconds including camera startup (also enforced by the watchdog for a stalled stream). Field preparation after a match retains the existing overall 15-second bound and fresh-evidence checks.
+
+Experimental automatic mode gets at most three recognition attempts per lock cycle. Each failed identity/recognition timeout shows “Try again”, stops and joins its camera, waits one second, then creates a fresh attempt/face window. The third failure stops with a password/Touch ID fallback. No credential submission is retried, and authorization, focus, camera and session errors do not trigger these recognition retries. Desktop return resets the allowance; sleep and display wake do not. Each attempt still replaces the operational report.
+
+NSWorkspace screen-sleep notifications now stop the camera and cancel the in-flight operation independently of full system sleep. Screen wake can start a new scan only while attempts remain. A display sleep after input consumption revokes automatic unlocking rather than allowing another submission. Tests cover immediate nonmatch rejection with no prompt access, three distinct permits and the hard limit across display wake, owner recovery on a retry, late results after display sleep, and bounded timeout with inference cleanup before retry. Live display-sleep and three-attempt hardware acceptance remain pending.
+
+Validation: full suite executed 203 tests with 195 passed, eight opt-in integrations skipped and zero failures using native macOS framework access.

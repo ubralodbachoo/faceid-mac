@@ -193,19 +193,23 @@ private struct LockScreenIndicatorView: View {
         switch phase {
         case .unlocked: "checkmark.circle"
         case .fallback: "lock.circle"
-        case .waitingForPasswordField: "lock"
-        case .submitting, .awaitingDesktop: "lock.open"
         default: "faceid"
+        }
+    }
+
+    private var tint: Color {
+        switch phase {
+        case .unlocked: .green
+        case .fallback: .orange
+        default: Color(red: 0.25, green: 0.62, blue: 1)
         }
     }
 
     private var label: String {
         switch phase {
-        case .unlocked: "Desktop observed"
-        case .fallback: failureCaption ?? "Use password or Touch ID"
-        case .waitingForPasswordField: "Waiting for password field"
-        case .submitting: "Submitting password"
-        case .awaitingDesktop: "Waiting for the desktop"
+        case .unlocked: "Unlocked"
+        case .fallback: retryableFailure ? "Try again" : "Failed. \(failureCaption ?? "Use password or Touch ID")"
+        case .waitingForPasswordField, .submitting, .awaitingDesktop: "Face unlock in progress"
         default: "Looking for your face"
         }
     }
@@ -217,7 +221,7 @@ private struct LockScreenIndicatorView: View {
               ZStack {
                 Image(systemName: symbol)
                     .font(.system(size: phase == .fallback ? 60 : min(width * 0.52, 84), weight: .light))
-                    .foregroundStyle(phase == .fallback ? Color.orange : Color(red: 0.25, green: 0.62, blue: 1))
+                    .foregroundStyle(tint)
                     .opacity(phase == .scanning && !reduceMotion && scanning ? 0.55 : 1)
                 if phase == .scanning {
                     RoundedRectangle(cornerRadius: 1).fill(Color(red: 0.25, green: 0.62, blue: 1).opacity(0.5))
@@ -225,10 +229,14 @@ private struct LockScreenIndicatorView: View {
                         .offset(y: reduceMotion ? 0 : (scanning ? 38 : -38))
                 }
               }
-              if phase == .waitingForPasswordField || phase == .fallback {
-                  Text(phase == .waitingForPasswordField ? "Preparing password field" : failureCaption ?? "Use password or Touch ID").font(.system(size: 11, weight: .medium))
-                      .foregroundStyle(.orange).multilineTextAlignment(.center)
+              if phase == .unlocked || phase == .fallback {
+                  Text(phase == .unlocked ? "Unlocked" : retryableFailure ? "Try again" : "Failed").font(.system(size: 12, weight: .medium))
+                      .foregroundStyle(tint)
+                  if phase == .fallback && !retryableFailure {
+                    Text(failureCaption ?? "Use password or Touch ID").font(.system(size: 11))
+                      .foregroundStyle(tint).multilineTextAlignment(.center)
                       .lineLimit(2).padding(.horizontal, 12)
+                  }
               }
             }
             .frame(height: LockScreenIndicatorGeometry.height(width: width, safeTop: safeTop) - max(0, safeTop))
@@ -241,5 +249,9 @@ private struct LockScreenIndicatorView: View {
             guard phase == .scanning, !reduceMotion else { return }
             withAnimation(.easeInOut(duration: 1.15).repeatForever(autoreverses: true)) { scanning = true }
         }
+    }
+
+    private var retryableFailure: Bool {
+        failureCaption == LockScreenFailure.identity.caption || failureCaption == LockScreenFailure.timeout.caption
     }
 }

@@ -188,13 +188,11 @@ struct LockScreenInput {
         return candidates
     }
 
-    /// Wake the password prompt once, with a non-secret key sent only to verified loginwindow.
-    /// Skip the wake key when the focused element is already a secure field.
+    /// Wake the password prompt once, after verifying the locked account and Apple loginwindow.
+    /// AX focus alone does not prove the lock-screen cover has exposed the password prompt.
+    /// Return dismisses the cover before any saved password is accessed or entered.
     func revealPasswordPrompt() throws {
         let app = try focusedLoginwindow()
-        let system = AXUIElementCreateSystemWide()
-        let focusedFields = [element(app, kAXFocusedUIElementAttribute), element(system, kAXFocusedUIElementAttribute)].compactMap { $0 }
-        if focusedFields.contains(where: { string($0, kAXSubroleAttribute) == kAXSecureTextFieldSubrole as String }) { return }
         let snapshot = MacSessionReader().read()
         guard snapshot.assessment(at: ProcessInfo.processInfo.systemUptime, maximumAge: 0.5) == .observedLocked else {
             throw InputError.changed
@@ -202,10 +200,17 @@ struct LockScreenInput {
         var pid: pid_t = 0
         guard AXUIElementGetPid(app, &pid) == .success, pid > 0,
               CFEqual(try focusedLoginwindow(), app) else { throw InputError.target }
-        guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: true),
-              let up = CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: false) else { throw InputError.event }
+        let source = CGEventSource(stateID: .hidSystemState)
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: false) else { throw InputError.event }
         down.flags = []; up.flags = []
-        down.postToPid(pid); up.postToPid(pid)
+        // The cover is managed by WindowServer: direct-to-PID delivery can bypass the
+        // user-activity handling that opens it. The owner confirmed Return opens this
+        // cover; Space did not. Only this pre-input Return uses the HID event stream.
+        // Password clearing, text and final submission remain PID-directed.
+        down.post(tap: .cghidEventTap)
+        Thread.sleep(forTimeInterval: 0.04)
+        up.post(tap: .cghidEventTap)
     }
 
     func submit(_ password: Data, to target: SecureInputTarget, stillAuthorized: () -> Bool) throws {

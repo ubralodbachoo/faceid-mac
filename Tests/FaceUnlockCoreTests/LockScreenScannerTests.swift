@@ -196,29 +196,30 @@ final class LockScreenScannerTests: XCTestCase {
         catch { XCTAssertTrue(fixture.camera.stopped) }
     }
     @MainActor
-    func testInitialDifferentOrBorderlineWindowDoesNotEndScanBeforeLaterMatch() async throws {
+    func testDifferentOrBorderlineWindowFailsWithoutRequestingPasswordInput() async throws {
         for score in [0.1, 0.45] {
             let fixture = try HiddenScanFixture()
             fixture.score = score
+            var inputChecks = 0
             try await fixture.scanner.prepare()
-            let scan = Task { try await fixture.scanner.scan(template: fixture.template, attemptID: UUID(), check: fixture.check) }
+            let scan = Task {
+                try await fixture.scanner.scan(template: fixture.template, attemptID: UUID(), check: fixture.check,
+                    readyToReturn: { inputChecks += 1; return true })
+            }
             for _ in 0..<100 { await Task.yield() }
             try await fixture.send(12)
-            XCTAssertFalse(fixture.camera.stopped, "A negative initial window must not reject the owner immediately")
-            fixture.score = 1
-            try await fixture.send(12)
             fixture.camera.stop()
-            let result = try await scan.value
-            XCTAssertEqual(result.comparison, .similar)
-            XCTAssertGreaterThanOrEqual(fixture.scanner.diagnostics.analyzedFrames, 22)
-            await fixture.scanner.finish()
+            do { _ = try await scan.value; XCTFail("A completed nonmatch must fail this attempt") }
+            catch { XCTAssertEqual(error as? FaceUnlockAttemptError, .identity) }
+            XCTAssertEqual(inputChecks, 0)
+            XCTAssertTrue(fixture.camera.stopped)
         }
     }
 
     @MainActor
     func testNonmatchingInputStillCannotContinueBeyondDeadline() async throws {
         let fixture = try HiddenScanFixture()
-        fixture.score = 0.1; fixture.deadline = 103
+        fixture.score = 0.1; fixture.deadline = 101
         try await fixture.scanner.prepare()
         let scan = Task { try await fixture.scanner.scan(template: fixture.template, attemptID: UUID(), check: fixture.check) }
         for _ in 0..<100 { await Task.yield() }

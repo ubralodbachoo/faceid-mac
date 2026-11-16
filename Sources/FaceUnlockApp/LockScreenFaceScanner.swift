@@ -88,10 +88,10 @@ final class LockScreenFaceScanner {
                     diagnostics.peakUsableFrames = max(diagnostics.peakUsableFrames, window.count)
                     guard let result else { continue }
                     diagnostics.comparisonCounts[result.outcome.rawValue, default: 0] += 1
-                    // Warm-up/poor initial frames cannot end a still-eligible scan early.
+                    // A completed nonmatching window ends this attempt. Never open the prompt.
                     guard result.outcome == .similar else {
                         diagnostics.lastIssue = result.outcome == .different ? .different : .borderline
-                        continue
+                        throw FaceUnlockAttemptError.identity
                     }
                     try Task.checkCancellation(); try check()
                     guard try readyToReturn() else {

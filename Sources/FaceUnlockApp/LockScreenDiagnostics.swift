@@ -27,6 +27,7 @@ struct LockScreenCaptureDiagnostics: Codable, Sendable {
 enum LockScreenFailure: String, Codable, Sendable {
     case scanOnly, identity, liveness, timeout, session, credentials, focus, accessibility
     case staleEvidence, camera, input, unconfirmed, canceled, setup
+    case attemptLimit
 
     var caption: String {
         switch self {
@@ -44,6 +45,7 @@ enum LockScreenFailure: String, Codable, Sendable {
         case .unconfirmed: "Unlock not confirmed"
         case .canceled: "Scan canceled"
         case .setup: "Setup did not complete"
+        case .attemptLimit: "3 attempts used. Use password or Touch ID"
         }
     }
 

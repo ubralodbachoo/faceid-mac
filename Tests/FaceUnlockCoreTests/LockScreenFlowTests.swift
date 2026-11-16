@@ -55,6 +55,7 @@ private final class LockFixture {
     var inputPermission = true
     var prepareInput: (() throws -> Void)?
     var promptReveals = 0
+    var revealInput: (() throws -> Void)?
     var reports: [LockScreenDiagnosticReport] = []
     var finishCamera: (() async -> Void)?
     var finishCalls = 0
@@ -75,6 +76,7 @@ private final class LockFixture {
                 for _ in 0..<200 {
                     try check()
                     if try ready() { return outcome(id) }
+                    time += 0.2 // A new matching camera frame advances continuous time.
                     try await Task.sleep(for: .milliseconds(10))
                 }
                 throw FaceUnlockAttemptError.expired
@@ -93,7 +95,7 @@ private final class LockFixture {
                 credentialsReady = true
             }, inputPermissionGranted: { [unowned self] in inputPermission },
             prepareInput: { [unowned self] in try prepareInput?() },
-            revealInput: { [unowned self] in promptReveals += 1 },
+            revealInput: { [unowned self] in try revealInput?(); promptReveals += 1 },
             finishCamera: { [unowned self] in finishCalls += 1; if let finishCamera { await finishCamera() } },
             captureDiagnostics: { [unowned self] in capture },
             saveDiagnostic: { [unowned self] in reports.append($0) })
@@ -114,7 +116,7 @@ private final class LockFixture {
 final class LockScreenFlowTests: XCTestCase {
     @MainActor
     private func waitUntil(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
-        for _ in 0..<1500 {
+        for _ in 0..<4000 {
             if condition() { return }
             try await Task.sleep(for: .milliseconds(1))
         }
@@ -136,6 +138,7 @@ final class LockScreenFlowTests: XCTestCase {
         try await waitUntil { !fixture.model.isBusy }
         XCTAssertEqual(fixture.scanCount, 1)
         XCTAssertEqual(fixture.submissions, 0)
+        XCTAssertEqual(fixture.promptReveals, 0)
         XCTAssertEqual(fixture.model.phase, .fallback)
         XCTAssertTrue(fixture.model.status.contains("No password entered"))
         XCTAssertFalse(fixture.vault.sessionIsValid)
@@ -482,6 +485,65 @@ final class LockScreenFlowTests: XCTestCase {
     }
 
     @MainActor
+    func testPromptOpensBeforePreparingEvenWhenSecureFieldIsAlreadyAvailable() async throws {
+        let fixture = try LockFixture(supportsExperimentalUnlock: true)
+        defer { fixture.model.disableAutomaticScanning() }
+        var revealedAt: Double?
+        var fieldChecks = 0
+        fixture.revealInput = {
+            XCTAssertEqual(fieldChecks, 0)
+            XCTAssertEqual(fixture.submissions, 0)
+            revealedAt = fixture.time
+        }
+        fixture.prepareInput = {
+            fieldChecks += 1
+            XCTAssertEqual(fixture.promptReveals, 1)
+            XCTAssertGreaterThanOrEqual(fixture.time - (revealedAt ?? fixture.time), 0.5)
+        }
+        try await enableExperimental(fixture)
+        fixture.autoDesktop = true
+        fixture.lock = .locked; fixture.model.automaticTick()
+        try await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.promptReveals, 1)
+        XCTAssertEqual(fieldChecks, 1)
+        XCTAssertEqual(fixture.submissions, 1)
+        XCTAssertEqual(fixture.model.phase, .unlocked)
+    }
+
+    @MainActor
+    func testPromptTransitionRetriesOnlyUntilKeyIsSent() async throws {
+        let fixture = try LockFixture(supportsExperimentalUnlock: true)
+        defer { fixture.model.disableAutomaticScanning() }
+        var revealChecks = 0
+        fixture.revealInput = {
+            revealChecks += 1
+            if revealChecks == 1 { throw InputError.target }
+        }
+        try await enableExperimental(fixture)
+        fixture.autoDesktop = true
+        fixture.lock = .locked; fixture.model.automaticTick()
+        try await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(revealChecks, 2)
+        XCTAssertEqual(fixture.promptReveals, 1)
+        XCTAssertEqual(fixture.submissions, 1)
+    }
+
+    @MainActor
+    func testAccountChangeDuringPromptAnimationPreventsPasswordPreparation() async throws {
+        let fixture = try LockFixture(supportsExperimentalUnlock: true)
+        defer { fixture.model.disableAutomaticScanning() }
+        var fieldChecks = 0
+        fixture.revealInput = { fixture.consoleUID = 502 }
+        fixture.prepareInput = { fieldChecks += 1 }
+        try await enableExperimental(fixture)
+        fixture.lock = .locked; fixture.model.automaticTick()
+        try await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.promptReveals, 1)
+        XCTAssertEqual(fieldChecks, 0)
+        XCTAssertEqual(fixture.submissions, 0)
+    }
+
+    @MainActor
     func testSessionLossWhileWaitingForPasswordFieldStopsScanWithoutSubmitting() async throws {
         let fixture = try LockFixture(supportsExperimentalUnlock: true)
         defer { fixture.model.disableAutomaticScanning() }
@@ -497,6 +559,103 @@ final class LockScreenFlowTests: XCTestCase {
         XCTAssertEqual(fixture.scanCount, 1)
         XCTAssertEqual(fixture.submissions, 0)
         XCTAssertNotEqual(fixture.model.phase, .unlocked)
+    }
+
+    @MainActor
+    func testThreeRecognitionFailuresStopWithoutOpeningPromptAndWakeCannotResetLimit() async throws {
+        let fixture = try LockFixture(supportsExperimentalUnlock: true)
+        defer { fixture.model.disableAutomaticScanning() }
+        var ids: Set<UUID> = []
+        fixture.scan = { id in ids.insert(id); throw FaceUnlockAttemptError.identity }
+        try await enableExperimental(fixture)
+        fixture.lock = .locked; fixture.model.automaticTick()
+        try await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.scanCount, 3)
+        XCTAssertEqual(ids.count, 3, "Every retry needs a new permit and fresh face evidence")
+        XCTAssertEqual(fixture.finishCalls, 3)
+        XCTAssertEqual(fixture.model.failure, .attemptLimit)
+        XCTAssertEqual(fixture.promptReveals, 0)
+        XCTAssertEqual(fixture.submissions, 0)
+        fixture.notifications.post(name: NSWorkspace.screensDidSleepNotification, object: nil)
+        for _ in 0..<100 { await Task.yield() }
+        fixture.notifications.post(name: NSWorkspace.screensDidWakeNotification, object: nil)
+        for _ in 0..<100 { await Task.yield() }
+        fixture.model.automaticTick()
+        XCTAssertEqual(fixture.scanCount, 3)
+        fixture.lock = .unlocked; fixture.model.automaticTick()
+        fixture.scan = nil; fixture.autoDesktop = true
+        fixture.lock = .locked; fixture.model.automaticTick()
+        try await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.scanCount, 4, "A new lock cycle receives a fresh retry allowance")
+        XCTAssertEqual(fixture.submissions, 1)
+    }
+
+    @MainActor
+    func testRetryCanRecognizeOwnerAndSubmitOnlyOnce() async throws {
+        let fixture = try LockFixture(supportsExperimentalUnlock: true)
+        defer { fixture.model.disableAutomaticScanning() }
+        fixture.scan = { _ in fixture.scan = nil; throw FaceUnlockAttemptError.identity }
+        try await enableExperimental(fixture)
+        fixture.autoDesktop = true
+        fixture.lock = .locked; fixture.model.automaticTick()
+        try await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.scanCount, 2)
+        XCTAssertEqual(fixture.promptReveals, 1)
+        XCTAssertEqual(fixture.submissions, 1)
+        XCTAssertEqual(fixture.model.phase, .unlocked)
+    }
+
+    @MainActor
+    func testDisplaySleepStopsCameraAndDiscardsLateMatchUntilDisplayWakes() async throws {
+        let fixture = try LockFixture(supportsExperimentalUnlock: true)
+        defer { fixture.model.disableAutomaticScanning() }
+        var pending: CheckedContinuation<LockScreenScanResult, any Error>?
+        var id: UUID?
+        fixture.scan = { attemptID in
+            id = attemptID
+            return try await withCheckedThrowingContinuation { pending = $0 }
+        }
+        try await enableExperimental(fixture)
+        fixture.lock = .locked; fixture.model.automaticTick()
+        try await waitUntil { pending != nil }
+        fixture.notifications.post(name: NSWorkspace.screensDidSleepNotification, object: nil)
+        try await waitUntil { fixture.model.phase == .canceled }
+        XCTAssertGreaterThan(fixture.stopped, 0)
+        pending?.resume(returning: fixture.outcome(try XCTUnwrap(id)))
+        try await waitUntil { !fixture.model.isBusy }
+        fixture.model.automaticTick()
+        XCTAssertEqual(fixture.scanCount, 1)
+        XCTAssertEqual(fixture.submissions, 0)
+        XCTAssertEqual(fixture.promptReveals, 0)
+        fixture.scan = nil; fixture.autoDesktop = true
+        fixture.notifications.post(name: NSWorkspace.screensDidWakeNotification, object: nil)
+        try await waitUntil { fixture.scanCount == 2 && !fixture.model.isBusy }
+        XCTAssertEqual(fixture.submissions, 1)
+    }
+
+    @MainActor
+    func testRecognitionTimeoutStopsCameraAndRetryWaitsForOldInference() async throws {
+        let fixture = try LockFixture(supportsExperimentalUnlock: true)
+        defer { fixture.model.disableAutomaticScanning() }
+        var pending: CheckedContinuation<LockScreenScanResult, any Error>?
+        var id: UUID?
+        fixture.scan = { attemptID in
+            id = attemptID
+            return try await withCheckedThrowingContinuation { pending = $0 }
+        }
+        try await enableExperimental(fixture)
+        fixture.lock = .locked; fixture.model.automaticTick()
+        try await waitUntil { pending != nil }
+        fixture.time += 6
+        fixture.model.watchdogTick()
+        XCTAssertEqual(fixture.model.failure, .timeout)
+        XCTAssertGreaterThan(fixture.stopped, 0)
+        XCTAssertEqual(fixture.scanCount, 1)
+        fixture.scan = nil; fixture.autoDesktop = true
+        pending?.resume(returning: fixture.outcome(try XCTUnwrap(id)))
+        try await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.scanCount, 2)
+        XCTAssertEqual(fixture.submissions, 1)
     }
 
     @MainActor

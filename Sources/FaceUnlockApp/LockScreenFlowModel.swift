@@ -58,6 +58,8 @@ final class LockScreenFlowModel: ObservableObject {
     private var automaticPolling: Task<Void, Never>?
     private var automaticLockHandled = false
     private var automaticSleeping = false
+    private var screensSleeping = false
+    private var automaticAttempts = 0
     private var isAutomaticAttempt = false
     private var desktopReturnObserved = false
     private var inputConsumed = false
@@ -72,6 +74,7 @@ final class LockScreenFlowModel: ObservableObject {
         submissionEnabled = services.submissionEnabled
         let center = notifications ?? NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.didWakeNotification,
+                     NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification,
                      NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.willPowerOffNotification] {
             observe(center, name)
         }
@@ -91,6 +94,15 @@ final class LockScreenFlowModel: ObservableObject {
 
     private func handleEvent(_ name: Notification.Name) {
         switch name {
+        case NSWorkspace.screensDidSleepNotification:
+            screensSleeping = true
+            services.stopCamera()
+            cancel(reason: "The screen turned off. Camera stopped.")
+            if inputConsumed { clearAutomaticSession() }
+        case NSWorkspace.screensDidWakeNotification:
+            if screensSleeping { automaticLockHandled = false }
+            screensSleeping = false
+            automaticTick()
         case NSWorkspace.willSleepNotification:
             automaticSleeping = true
             cancel(reason: "The Mac slept. The current scan stopped.")
@@ -113,6 +125,7 @@ final class LockScreenFlowModel: ObservableObject {
             if observed.processUserID == userID, !services.suspended(),
                assessment == .unlocked || assessment == .lockUnknown {
                 automaticLockHandled = false
+                automaticAttempts = 0
                 if phase == .awaitingDesktop, submittedAt != nil { desktopReturnObserved = true }
                 else if isAutomaticAttempt { cancel(reason: "The Mac was unlocked. Camera stopped.") }
             }
@@ -177,7 +190,7 @@ final class LockScreenFlowModel: ObservableObject {
                 automaticTemplate = template
                 automaticUnlockEnabled = experimentalUnlock
                 automaticScanningEnabled = true
-                automaticLockHandled = false; automaticSleeping = false
+                automaticLockHandled = false; automaticSleeping = false; automaticAttempts = 0
                 finish(.idle, experimentalUnlock
                     ? "Experimental face unlock is on. Each lock can submit your saved password once after a match. Photos/video may also unlock."
                     : "Every lock scanning is on. Lock your Mac normally; no manual arming is needed.")
@@ -206,6 +219,7 @@ final class LockScreenFlowModel: ObservableObject {
         automaticPolling?.cancel(); automaticPolling = nil
         automaticScanningEnabled = false; automaticUnlockEnabled = false
         automaticTemplate = nil; automaticLockHandled = false
+        automaticAttempts = 0
         services.revokeCredentials()
     }
 
@@ -221,12 +235,14 @@ final class LockScreenFlowModel: ObservableObject {
             disableAutomaticScanning(reason: "Account changed. Automatic scanning is off."); return
         case .unlocked:
             automaticLockHandled = false
+            automaticAttempts = 0
             if isAutomaticAttempt, phase != .awaitingDesktop { cancel(reason: "The Mac was unlocked. Camera stopped.") }
             return
         case .observedLocked: break
         default: return // Missing observations cannot start a scan or reset the lock-cycle latch.
         }
-        guard !automaticSleeping, !services.suspended(), !isBusy, !automaticLockHandled,
+        guard !automaticSleeping, !screensSleeping, !services.suspended(), !isBusy, !automaticLockHandled,
+              automaticAttempts < 3,
               services.available(), let template = automaticTemplate else { return }
         automaticLockHandled = true
         launch(automaticTemplate: template)
@@ -264,8 +280,25 @@ final class LockScreenFlowModel: ObservableObject {
                 if !automaticUnlockEnabled { services.revokeCredentials() }
                 attempt = nil; operation = nil; isAutomaticAttempt = false; isBusy = false
             }
-            await executeAttempt(preparedTemplate: preparedTemplate)
-            await services.finishCamera()
+            repeat {
+                if isAutomaticAttempt { automaticAttempts += 1 }
+                await executeAttempt(preparedTemplate: preparedTemplate)
+                await services.finishCamera()
+                guard isAutomaticAttempt, automaticUnlockEnabled, !inputConsumed,
+                      phase == .fallback, failure == .identity || failure == .timeout,
+                      !Task.isCancelled, !automaticSleeping, !screensSleeping else { break }
+                guard automaticAttempts < 3 else {
+                    finish(.fallback, "Three face attempts failed. Use password or Touch ID.", failure: .attemptLimit)
+                    break
+                }
+                // Show Try again with the camera off between separate, bounded attempts.
+                do { try await Task.sleep(for: .seconds(1)) } catch { break }
+                guard !Task.isCancelled, automaticUnlockEnabled, !automaticSleeping, !screensSleeping,
+                      services.snapshot().assessment(at: services.uptime(), maximumAge: 0.5) == .observedLocked else { break }
+                watchdog?.cancel(); watchdog = nil
+                failure = nil; attempt = nil; evidenceAgeMilliseconds = nil
+                phase = .preparing
+            } while true
         }
     }
 
@@ -300,7 +333,7 @@ final class LockScreenFlowModel: ObservableObject {
             try current.beginScan(now: services.now(), snapshot: services.snapshot(), uptime: services.uptime())
             attempt = current
             phase = .scanning; record("Looking for your face…")
-            var promptRevealAttempted = false
+            var promptRevealedAt: Double?
             let result = try await services.scan(template, current.id, { [weak self] in
                 guard let self else { throw CancellationError() }
                 try self.checkScanning()
@@ -309,6 +342,18 @@ final class LockScreenFlowModel: ObservableObject {
                 try self.checkScanning()
                 guard self.shouldSubmit else { return true }
                 do {
+                    // AX can report a secure field before the lock-screen cover is dismissed.
+                    // Reveal once even when that field already appears focused, then allow the
+                    // animation to settle while the scanner continues collecting fresh evidence.
+                    guard let promptRevealedAt else {
+                        self.phase = .waitingForPasswordField
+                        self.record("Face matched. Opening the Mac password field…")
+                        try self.services.revealInput()
+                        promptRevealedAt = self.services.now()
+                        return false
+                    }
+                    guard self.services.now() - promptRevealedAt >= 0.5 else { return false }
+                    try self.checkScanning()
                     try self.services.prepareInput()
                     return true
                 } catch let error as InputError where error == .target || error == .field {
@@ -316,14 +361,7 @@ final class LockScreenFlowModel: ObservableObject {
                         self.phase = .waitingForPasswordField
                         self.record("Face matched. Waiting for the Mac password field; keeping the camera active for a fresh match.")
                     }
-                    if !promptRevealAttempted {
-                        do {
-                            try self.services.revealInput()
-                            promptRevealAttempted = true
-                        } catch let revealError as InputError where revealError == .target || revealError == .field {
-                            // loginwindow may still be transitioning; keep analyzing fresh frames.
-                        }
-                    }
+                    // Target/field transitions may retry preparation, never password submission.
                     return false
                 }
             })
@@ -434,10 +472,12 @@ final class LockScreenFlowModel: ObservableObject {
     private func checkScanning() throws {
         try Task.checkCancellation()
         let templateValid = isAutomaticAttempt ? automaticScanningEnabled && automaticTemplate != nil : vault.sessionIsValid
-        guard (phase == .scanning || phase == .waitingForPasswordField), !automaticSleeping, !services.suspended(), templateValid, let attempt else {
+        guard (phase == .scanning || phase == .waitingForPasswordField), !automaticSleeping, !screensSleeping, !services.suspended(), templateValid, let attempt else {
             throw FaceUnlockAttemptError.session
         }
         try attempt.checkTime(services.now())
+        if phase == .scanning, let started = attempt.scanStartedAt,
+           services.now() - started >= 6 { throw FaceUnlockAttemptError.expired }
         try attempt.checkSession(services.snapshot(), uptime: services.uptime())
         if shouldSubmit && !services.credentialsReady() { throw FaceUnlockAttemptError.credentials }
     }
@@ -448,7 +488,11 @@ final class LockScreenFlowModel: ObservableObject {
             if phase == .waitingForLock { try checkWaiting() }
             if phase == .scanning || phase == .waitingForPasswordField { try checkScanning() }
         } catch {
-            operation?.cancel(); services.stopCamera(); vault.lock()
+            // A recognition timeout may retry only after this camera/inference has joined.
+            if !(automaticUnlockEnabled && !inputConsumed && error as? FaceUnlockAttemptError == .expired) {
+                operation?.cancel()
+            }
+            services.stopCamera(); vault.lock()
             if automaticUnlockEnabled && !services.credentialsReady() { clearAutomaticSession() }
             if !automaticUnlockEnabled { services.revokeCredentials() }
             finish(.fallback, error.localizedDescription, failure: .classify(error))
