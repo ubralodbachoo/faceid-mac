@@ -30,13 +30,14 @@ struct LockScreenFlowView: View {
                 } else {
                     Button("Scan only on every lock", action: model.enableAutomaticScanning)
                         .disabled(!hasEnrollment || otherWorkActive)
-                    Button("Preview indicator", action: indicator.preview).disabled(otherWorkActive)
                 }
+                Button("Preview indicator", action: indicator.preview)
+                    .disabled(otherWorkActive || model.isBusy)
             }.controlSize(.large)
             if !model.automaticScanningEnabled && !model.isBusy {
                 Button("Return to setup", action: onCredentialSetup)
             }
-            Text("A yellow lock in scan-only mode means no password was entered. A failed unlock shows the reason below the lock icon.")
+            Text("Scan-only mode never enters a password. A failed attempt shakes the Face ID icon; its reason is shown in these diagnostics.")
                 .font(.caption).foregroundStyle(.secondary)
             if !model.events.isEmpty {
                 DisclosureGroup("Recent events") {

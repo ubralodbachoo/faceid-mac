@@ -54,6 +54,8 @@ struct LockScreenOverlayDelivery {
 final class LockScreenIndicator: NSObject {
     private var panel: IndicatorPanel?
     private var dismissal: Task<Void, Never>?
+    private var previewSequence: Task<Void, Never>?
+    private let presentation = LockScreenIndicatorPresentation()
     private var observation: AnyCancellable?
     private var visiblePhase = LockScreenPhase.idle
     private var visibleCaption: String?
@@ -76,20 +78,31 @@ final class LockScreenIndicator: NSObject {
     func prepareForLockScreen() { LockScreenWindowBridge.prepare() }
 
     func preview() {
+        hide()
         show(.scanning)
-        dismiss(after: 3)
+        previewSequence = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(2.2))
+                self?.show(.waitingForPasswordField)
+                try await Task.sleep(for: .seconds(1.6))
+                self?.show(.unlocked)
+                try await Task.sleep(for: .seconds(1.05))
+                self?.dismiss(after: 0)
+            } catch { return }
+        }
     }
 
     private func update(_ phase: LockScreenPhase, caption: String?) {
+        previewSequence?.cancel(); previewSequence = nil
         switch phase {
         case .scanning, .waitingForPasswordField, .submitting, .awaitingDesktop:
             if phase == .scanning && visiblePhase != .scanning { diagnostics = LockScreenIndicatorDiagnostics() }
             show(phase)
         case .unlocked:
-            show(phase); dismiss(after: 1.4)
+            show(phase); dismiss(after: 1.05)
         case .fallback:
             // Desktop preflight errors must not create an unsolicited lock-screen overlay.
-            if panel?.isVisible == true { show(phase, caption: caption); dismiss(after: 4) }
+            if panel?.isVisible == true { show(phase, caption: caption); dismiss(after: 1) }
         default: hide()
         }
     }
@@ -120,8 +133,17 @@ final class LockScreenIndicator: NSObject {
             panel.title = "Face Unlock indicator"
             self.panel = panel
         }
+        presentation.update(phase: phase, safeTop: screen.safeAreaInsets.top,
+                            width: frame.width, failureCaption: caption)
         panel.setFrame(frame, display: false)
-        panel.contentView = NSHostingView(rootView: LockScreenIndicatorView(phase: phase, safeTop: screen.safeAreaInsets.top, width: frame.width, failureCaption: caption))
+        // Preserve one hosting view and animation clock across processing sub-stages.
+        if !(panel.contentView is NSHostingView<LockScreenIndicatorView>) {
+            let hosting = NSHostingView(rootView: LockScreenIndicatorView(presentation: presentation))
+            // The view already reserves the physical notch height. AppKit's automatic
+            // safe-area inset would add it a second time and separate the black surfaces.
+            hosting.safeAreaRegions = []
+            panel.contentView = hosting
+        }
         // Lay out/composite before moving into the lock-screen space.
         panel.contentView?.layoutSubtreeIfNeeded()
         panel.displayIfNeeded()
@@ -153,6 +175,8 @@ final class LockScreenIndicator: NSObject {
     }
 
     func hide() {
+        previewSequence?.cancel(); previewSequence = nil
+        presentation.reset()
         dismissal?.cancel(); dismissal = nil
         visibilityRefresh?.cancel(); visibilityRefresh = nil
         if let panel {
@@ -164,6 +188,8 @@ final class LockScreenIndicator: NSObject {
     private func dismiss(after seconds: Double) {
         dismissal = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(seconds)) } catch { return }
+            self?.presentation.collapse()
+            do { try await Task.sleep(for: .milliseconds(340)) } catch { return }
             self?.hide()
         }
     }
@@ -172,7 +198,7 @@ final class LockScreenIndicator: NSObject {
         guard panel?.isVisible == true else { return }
         let phase = visiblePhase
         show(phase, caption: visibleCaption)
-        if phase == .fallback || phase == .unlocked { dismiss(after: phase == .fallback ? 4 : 1.4) }
+        if phase == .fallback || phase == .unlocked { dismiss(after: phase == .fallback ? 1 : 1.05) }
     }
 }
 
@@ -181,77 +207,80 @@ private final class IndicatorPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+/// One clock per visible attempt; field preparation/submission never restart the sphere.
+@MainActor
+final class LockScreenIndicatorPresentation: ObservableObject {
+    @Published private(set) var phase = LockScreenPhase.idle
+    @Published private(set) var collapsing = false
+    private(set) var safeTop: CGFloat = 0
+    private(set) var width: CGFloat = 180
+    private(set) var failureCaption: String?
+    private(set) var startedAt: TimeInterval = 0
+    private(set) var stageBeganAt: TimeInterval = 0
+
+    func update(phase: LockScreenPhase, safeTop: CGFloat, width: CGFloat,
+                failureCaption: String?, now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        collapsing = false
+        if self.phase == .idle { startedAt = now; stageBeganAt = now }
+        if FaceIDAnimationStage(phase) != FaceIDAnimationStage(self.phase) { stageBeganAt = now }
+        self.safeTop = safeTop; self.width = width; self.failureCaption = failureCaption
+        self.phase = phase
+    }
+
+    func collapse() { collapsing = true }
+    func reset() { phase = .idle; collapsing = false }
+}
+
 private struct LockScreenIndicatorView: View {
-    let phase: LockScreenPhase
-    let safeTop: CGFloat
-    let width: CGFloat
-    let failureCaption: String?
+    @ObservedObject var presentation: LockScreenIndicatorPresentation
+    @State private var expanded = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var scanning = false
 
-    private var symbol: String {
-        switch phase {
-        case .unlocked: "checkmark.circle"
-        case .fallback: "lock.circle"
-        default: "faceid"
-        }
+    private var phase: LockScreenPhase { presentation.phase }
+    private var retryableFailure: Bool {
+        presentation.failureCaption == LockScreenFailure.identity.caption ||
+        presentation.failureCaption == LockScreenFailure.timeout.caption
     }
-
-    private var tint: Color {
-        switch phase {
-        case .unlocked: .green
-        case .fallback: .orange
-        default: Color(red: 0.25, green: 0.62, blue: 1)
-        }
-    }
-
     private var label: String {
         switch phase {
         case .unlocked: "Unlocked"
-        case .fallback: retryableFailure ? "Try again" : "Failed. \(failureCaption ?? "Use password or Touch ID")"
-        case .waitingForPasswordField, .submitting, .awaitingDesktop: "Face unlock in progress"
-        default: "Looking for your face"
+        case .fallback: retryableFailure ? "Try again" : "Failed. \(presentation.failureCaption ?? "Use password or Touch ID")"
+        case .waitingForPasswordField, .submitting, .awaitingDesktop: "Processing"
+        default: "Scanning for your face"
         }
     }
 
     var body: some View {
+        let width = presentation.width
+        let safeTop = max(0, presentation.safeTop)
+        let height = LockScreenIndicatorGeometry.height(width: width, safeTop: safeTop)
         VStack(spacing: 0) {
-            Color.clear.frame(height: max(0, safeTop))
-            VStack(spacing: 8) {
-              ZStack {
-                Image(systemName: symbol)
-                    .font(.system(size: phase == .fallback ? 60 : min(width * 0.52, 84), weight: .light))
-                    .foregroundStyle(tint)
-                    .opacity(phase == .scanning && !reduceMotion && scanning ? 0.55 : 1)
-                if phase == .scanning {
-                    RoundedRectangle(cornerRadius: 1).fill(Color(red: 0.25, green: 0.62, blue: 1).opacity(0.5))
-                        .frame(width: min(width * 0.52, 84), height: 2)
-                        .offset(y: reduceMotion ? 0 : (scanning ? 38 : -38))
-                }
-              }
-              if phase == .unlocked || phase == .fallback {
-                  Text(phase == .unlocked ? "Unlocked" : retryableFailure ? "Try again" : "Failed").font(.system(size: 12, weight: .medium))
-                      .foregroundStyle(tint)
-                  if phase == .fallback && !retryableFailure {
-                    Text(failureCaption ?? "Use password or Touch ID").font(.system(size: 11))
-                      .foregroundStyle(tint).multilineTextAlignment(.center)
-                      .lineLimit(2).padding(.horizontal, 12)
-                  }
-              }
+            Color.clear.frame(height: safeTop)
+            // Procedural vector frames: no upsampled video or repeating scan-line asset.
+            TimelineView(.animation(minimumInterval: 1.0 / 60, paused: reduceMotion || phase == .idle)) { _ in
+                let now = ProcessInfo.processInfo.systemUptime
+                let stage = FaceIDAnimationStage(phase)
+                let motionTime = (stage == .unlocked ? presentation.stageBeganAt : now) - presentation.startedAt
+                FaceIDAnimationFrame(stage: stage, motionTime: motionTime,
+                    stageTime: now - presentation.stageBeganAt, reduceMotion: reduceMotion)
+                    .frame(width: min(width * 0.67, 136), height: min(width * 0.67, 136))
+                    .frame(width: width, height: height - safeTop)
             }
-            .frame(height: LockScreenIndicatorGeometry.height(width: width, safeTop: safeTop) - max(0, safeTop))
         }
-        .frame(width: width, height: LockScreenIndicatorGeometry.height(width: width, safeTop: safeTop))
-        .background(.black, in: UnevenRoundedRectangle(bottomLeadingRadius: min(width * 0.22, 44), bottomTrailingRadius: min(width * 0.22, 44)))
+        .frame(width: width, height: height)
+        .background(.black, in: UnevenRoundedRectangle(bottomLeadingRadius: min(width * 0.22, 44),
+                                                      bottomTrailingRadius: min(width * 0.22, 44)))
+        .mask(alignment: .top) {
+            UnevenRoundedRectangle(bottomLeadingRadius: min(width * 0.22, 44),
+                                   bottomTrailingRadius: min(width * 0.22, 44))
+                .frame(height: expanded && !presentation.collapsing ? height : max(24, safeTop))
+        }
+        .animation(reduceMotion ? nil : .smooth(duration: 0.34), value: expanded)
+        .animation(reduceMotion ? nil : .smooth(duration: 0.34), value: presentation.collapsing)
+        .ignoresSafeArea()
+        .onAppear { expanded = true }
+        .onChange(of: phase) { _, phase in expanded = phase != .idle }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
-        .onAppear {
-            guard phase == .scanning, !reduceMotion else { return }
-            withAnimation(.easeInOut(duration: 1.15).repeatForever(autoreverses: true)) { scanning = true }
-        }
-    }
-
-    private var retryableFailure: Bool {
-        failureCaption == LockScreenFailure.identity.caption || failureCaption == LockScreenFailure.timeout.caption
     }
 }
