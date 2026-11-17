@@ -127,7 +127,10 @@ final class LockScreenIndicator: NSObject {
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
             panel.hidesOnDeactivate = false
             panel.isFloatingPanel = true
+            // Only the rounded exterior is transparent; the surface itself is RGB zero.
             panel.isOpaque = false; panel.backgroundColor = .clear
+            panel.alphaValue = 1
+            panel.colorSpace = .sRGB
             panel.hasShadow = false; panel.ignoresMouseEvents = true
             panel.isReleasedWhenClosed = false
             panel.title = "Face Unlock indicator"
@@ -135,15 +138,18 @@ final class LockScreenIndicator: NSObject {
         }
         presentation.update(phase: phase, safeTop: screen.safeAreaInsets.top,
                             width: frame.width, failureCaption: caption)
-        panel.setFrame(frame, display: false)
         // Preserve one hosting view and animation clock across processing sub-stages.
         if !(panel.contentView is NSHostingView<LockScreenIndicatorView>) {
             let hosting = NSHostingView(rootView: LockScreenIndicatorView(presentation: presentation))
             // The view already reserves the physical notch height. AppKit's automatic
             // safe-area inset would add it a second time and separate the black surfaces.
             hosting.safeAreaRegions = []
+            hosting.sizingOptions = []
+            hosting.autoresizingMask = [.width, .height]
             panel.contentView = hosting
         }
+        // Apply the screen-top frame after installing content so hosting cannot move it.
+        panel.setFrame(frame, display: false)
         // Lay out/composite before moving into the lock-screen space.
         panel.contentView?.layoutSubtreeIfNeeded()
         panel.displayIfNeeded()
@@ -203,6 +209,9 @@ final class LockScreenIndicator: NSObject {
 }
 
 private final class IndicatorPanel: NSPanel {
+    // AppKit normally keeps windows below the menu bar. This decorative panel must
+    // extend behind the hardware notch, using the full screen frame instead.
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }
@@ -233,6 +242,7 @@ final class LockScreenIndicatorPresentation: ObservableObject {
 
 private struct LockScreenIndicatorView: View {
     @ObservedObject var presentation: LockScreenIndicatorPresentation
+    private let surfaceBlack = Color(.sRGB, red: 0, green: 0, blue: 0, opacity: 1)
     @State private var expanded = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -268,12 +278,18 @@ private struct LockScreenIndicatorView: View {
             }
         }
         .frame(width: width, height: height)
-        .background(.black, in: UnevenRoundedRectangle(bottomLeadingRadius: min(width * 0.22, 44),
+        .background(surfaceBlack, in: UnevenRoundedRectangle(bottomLeadingRadius: min(width * 0.22, 44),
                                                       bottomTrailingRadius: min(width * 0.22, 44)))
         .mask(alignment: .top) {
             UnevenRoundedRectangle(bottomLeadingRadius: min(width * 0.22, 44),
                                    bottomTrailingRadius: min(width * 0.22, 44))
                 .frame(height: expanded && !presentation.collapsing ? height : max(24, safeTop))
+        }
+        // Keep the physical notch join opaque even while the rounded mask animates.
+        .overlay(alignment: .top) {
+            if safeTop > 0 {
+                Rectangle().fill(surfaceBlack).frame(height: safeTop + 1)
+            }
         }
         .animation(reduceMotion ? nil : .smooth(duration: 0.34), value: expanded)
         .animation(reduceMotion ? nil : .smooth(duration: 0.34), value: presentation.collapsing)
