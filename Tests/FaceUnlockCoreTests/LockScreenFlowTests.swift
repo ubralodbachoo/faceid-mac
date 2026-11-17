@@ -441,7 +441,7 @@ final class LockScreenFlowTests: XCTestCase {
 
     @MainActor
     private func enableExperimental(_ fixture: LockFixture) async throws {
-        fixture.identity = .experimentalMatch; fixture.liveness = .unavailable
+        fixture.identity = .experimentalMatch; fixture.liveness = .experimentalLiveness
         fixture.model.enableExperimentalUnlock(acknowledgingPhotoRisk: true)
         try await waitUntil { fixture.model.automaticUnlockEnabled && !fixture.model.isBusy }
     }
@@ -453,7 +453,7 @@ final class LockScreenFlowTests: XCTestCase {
         fixture.model.enableAutomaticScanning()
         try await waitUntil { fixture.model.automaticScanningEnabled && !fixture.model.isBusy }
         XCTAssertFalse(fixture.model.automaticUnlockEnabled)
-        fixture.identity = .experimentalMatch; fixture.liveness = .unavailable
+        fixture.identity = .experimentalMatch; fixture.liveness = .experimentalLiveness
         try await fixture.model.enableForSetup(acknowledgingPhotoRisk: true)
         XCTAssertTrue(fixture.model.automaticUnlockEnabled)
         XCTAssertEqual(fixture.credentialAuthorizations, 1)
@@ -693,7 +693,7 @@ final class LockScreenFlowTests: XCTestCase {
     }
 
     @MainActor
-    func testExperimentalMatchCanSubmitOncePerLockWithLivenessStillUnavailable() async throws {
+    func testExperimentalMatchWithHeuristicLivenessCanSubmitOncePerLock() async throws {
         let fixture = try LockFixture(supportsExperimentalUnlock: true)
         defer { fixture.model.disableAutomaticScanning() }
         try await enableExperimental(fixture)
@@ -713,7 +713,7 @@ final class LockScreenFlowTests: XCTestCase {
         }
         XCTAssertEqual(fixture.credentialAuthorizations, 1)
         XCTAssertEqual(fixture.vault.authorizations, 1)
-        XCTAssertEqual(fixture.liveness, .unavailable)
+        XCTAssertEqual(fixture.liveness, .experimentalLiveness)
     }
 
     @MainActor
@@ -856,8 +856,8 @@ final class LockScreenFlowTests: XCTestCase {
     }
 
     @MainActor
-    func testExperimentalModeRejectsNonMatchPADDenialAndStaleEvidence() async throws {
-        for scenario in 0..<4 {
+    func testExperimentalModeRejectsNonMatchMissingLivenessDenialAndStaleEvidence() async throws {
+        for scenario in 0..<5 {
             let fixture = try LockFixture(supportsExperimentalUnlock: true)
             defer { fixture.model.disableAutomaticScanning() }
             try await enableExperimental(fixture)
@@ -865,10 +865,33 @@ final class LockScreenFlowTests: XCTestCase {
             if scenario == 1 { fixture.liveness = .rejected }
             if scenario == 2 { fixture.identity = .unavailable }
             if scenario == 3 { fixture.scan = { id in fixture.outcome(id, observedAt: fixture.time - 1) } }
+            if scenario == 4 { fixture.liveness = .unavailable }
             fixture.lock = .locked; fixture.model.automaticTick()
             try await waitUntil { !fixture.model.isBusy }
             XCTAssertEqual(fixture.submissions, 0)
             XCTAssertNotEqual(fixture.model.phase, .unlocked)
+        }
+    }
+
+    @MainActor
+    func testLivenessFailureExplainsDeviceGlareOrGenericRejection() async throws {
+        for (cue, caption, message) in [
+            ("deviceDetected", "Screen shape detected", "screen-shaped rectangle"),
+            ("glossGlare", "Screen glare detected", "Screen-like glare"),
+            ("", "Liveness not verified", "Liveness is not verified")
+        ] {
+            let fixture = try LockFixture(supportsExperimentalUnlock: true)
+            defer { fixture.model.disableAutomaticScanning() }
+            try await enableExperimental(fixture)
+            fixture.liveness = .rejected
+            fixture.capture.livenessDecision = "rejected"
+            fixture.capture.livenessCue = cue
+            fixture.lock = .locked; fixture.model.automaticTick()
+            try await waitUntil { !fixture.model.isBusy }
+            XCTAssertEqual(fixture.submissions, 0)
+            XCTAssertEqual(fixture.model.failure, .liveness)
+            XCTAssertEqual(fixture.model.failureCaption, caption)
+            XCTAssertTrue(fixture.model.status.contains(message))
         }
     }
 

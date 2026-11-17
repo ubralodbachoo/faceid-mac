@@ -10,3 +10,7 @@ build/
 Models/ArcFace.mlpackage/
 Models/reference/
 Models/validation.json
+.venv-pad/
+Models/passive-pad-source/
+Models/PassivePAD.mlpackage/
+Models/passive-pad-validation.json

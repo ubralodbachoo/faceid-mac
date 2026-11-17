@@ -45,6 +45,8 @@ public struct FaceComparisonWindow: CustomStringConvertible, CustomDebugStringCo
     private var lastTime: Double?
     private var previousBounds: FaceBounds?
     public private(set) var result: FaceComparisonResult?
+    /// Changes whenever temporal identity continuity is discarded.
+    public private(set) var continuityGeneration = 0
     public var count: Int { scores.count }
     public var latestSimilarity: Double? { scores.last }
     public var description: String { "FaceComparisonWindow(frames: \(count), biometric data: redacted)" }
@@ -63,6 +65,7 @@ public struct FaceComparisonWindow: CustomStringConvertible, CustomDebugStringCo
     }
 
     public mutating func interrupt() {
+        continuityGeneration &+= 1
         scores.removeAll(keepingCapacity: true)
         times.removeAll(keepingCapacity: true); lastTime = nil; previousBounds = nil; result = nil
     }

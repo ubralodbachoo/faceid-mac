@@ -9,7 +9,9 @@ final class LockScreenDiagnosticTests: XCTestCase {
         LockScreenDiagnosticReport(schema: 1, recordedAt: Date(), appVersion: "test",
             mode: "experimental-unlock", stage: .submitting, outcome: .fallback, failure: failure,
             inputConsumed: false, passwordSubmitted: false, evidenceAgeMilliseconds: 825,
-            capture: LockScreenCaptureDiagnostics(analyzedFrames: 18, rejectedFrames: 2, usableFrames: 12, lastIssue: .usable))
+            capture: LockScreenCaptureDiagnostics(livenessDecision: "passed", livenessCue: "blink",
+                deviceRectangles: .init(), livenessWaitFrames: 2,
+                analyzedFrames: 18, rejectedFrames: 2, usableFrames: 12, lastIssue: .usable))
     }
 
     func testLastReportIsPrivateAtomicAndContainsOnlyOperationalFields() async throws {
@@ -23,7 +25,10 @@ final class LockScreenDiagnosticTests: XCTestCase {
         XCTAssertEqual(json["mode"] as? String, "experimental-unlock")
         XCTAssertEqual(Set(json.keys), ["schema", "recordedAt", "appVersion", "mode", "stage", "outcome", "failure", "inputConsumed", "passwordSubmitted", "evidenceAgeMilliseconds", "capture"])
         let capture = try XCTUnwrap(json["capture"] as? [String: Any])
-        XCTAssertEqual(Set(capture.keys), ["passwordFieldWaitFrames", "scheduledOutFrames", "comparisonCounts", "rejectionCounts", "peakUsableFrames", "analyzedFrames", "rejectedFrames", "usableFrames", "lastIssue"])
+        XCTAssertEqual(Set(capture.keys), ["livenessDecision", "livenessCue", "deviceRectangles", "livenessWaitFrames", "passwordFieldWaitFrames", "scheduledOutFrames", "comparisonCounts", "rejectionCounts", "peakUsableFrames", "analyzedFrames", "rejectedFrames", "usableFrames", "lastIssue"])
+        XCTAssertEqual(capture["livenessCue"] as? String, "blink")
+        let devices = try XCTUnwrap(capture["deviceRectangles"] as? [String: Any])
+        XCTAssertEqual(Set(devices.keys), ["candidates", "qualifying", "ignoredPartial", "ignoredBackground", "ignoredTight", "ignoredInvalid"])
         let attributes = try FileManager.default.attributesOfItem(atPath: store.file.path)
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), ["last-failed-lock-attempt.json", "last-lock-attempt.json"])

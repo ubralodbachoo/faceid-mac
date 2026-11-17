@@ -28,6 +28,8 @@ struct FaceWindowTrial: Identifiable {
     let presentation: EvaluationPresentation
     let outcome: FaceComparisonOutcome?
     let cameraMilliseconds: Double?
+    var passiveDecision: PassivePADEvaluationDecision? = nil
+    var passiveEverLive = false
 }
 
 @MainActor
@@ -39,6 +41,11 @@ final class FaceTestModel: ObservableObject {
     @Published private(set) var previewImage: CGImage?
     @Published private(set) var sampleCount = 0
     @Published private(set) var latestSimilarity: Double?
+    @Published private(set) var passiveScores: PassivePADScores?
+    @Published private(set) var passiveDecision = PassivePADEvaluationDecision.unavailable
+    @Published private(set) var passiveCandidateMilliseconds: Double?
+    @Published private(set) var passivePredictions = 0
+    @Published private(set) var passiveEverLive = false
     @Published private(set) var result: FaceComparisonResult?
     @Published private(set) var analysisMilliseconds: Double?
     @Published private(set) var preparationMilliseconds: Double?
@@ -81,7 +88,7 @@ final class FaceTestModel: ObservableObject {
     private var observers: [FaceTestNotificationToken] = []
 
     init(vault: any FaceTestTemplateReading = EnrollmentVault(modelIdentifier: ArcFaceContract.identifier),
-         session: MacEnrollmentSession = MacEnrollmentSession(), services: EnrollmentCaptureServices = .comparison,
+         session: MacEnrollmentSession = MacEnrollmentSession(), services: EnrollmentCaptureServices = .passiveComparison,
          notifications: NotificationCenter? = nil) {
         self.vault = vault; self.session = session; self.services = services
         for event in [NSWorkspace.willSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
@@ -105,6 +112,7 @@ final class FaceTestModel: ObservableObject {
         guard !isBusy else { return }
         vault.lock()
         result = nil; sampleCount = 0; latestSimilarity = nil; analysisMilliseconds = nil
+        passiveScores = nil; passiveDecision = .unavailable; passiveCandidateMilliseconds = nil; passivePredictions = 0; passiveEverLive = false
         preparationMilliseconds = nil; cameraStartupMilliseconds = nil; scanMilliseconds = nil
         acquisitionSummary = nil; analyzedFrameCount = 0; rejectedFrameCount = 0
         lastAcquisitionFeedback = "No analysis completed."
@@ -152,7 +160,7 @@ final class FaceTestModel: ObservableObject {
                 }
                 evaluationTrials.append(FaceWindowTrial(mode: runMode, presentation: presentation,
                     outcome: completed.result.outcome,
-                    cameraMilliseconds: (cameraStartupMilliseconds ?? 0) + (scanMilliseconds ?? 0)))
+                    cameraMilliseconds: (cameraStartupMilliseconds ?? 0) + (scanMilliseconds ?? 0), passiveDecision: passiveDecision, passiveEverLive: passiveEverLive))
                 if evaluationTrials.count > 100 { evaluationTrials.removeFirst() }
                 phase = .finished
                 switch completed.result.outcome {
@@ -172,6 +180,7 @@ final class FaceTestModel: ObservableObject {
                     if phase != .idle { failedCameraTests += 1 }
                 }
                 result = nil; sampleCount = 0; latestSimilarity = nil
+                passiveScores = nil; passiveDecision = .unavailable; passiveCandidateMilliseconds = nil
                 if cancellationMessage == nil { phase = .failed }
                 status = cancellationMessage ?? message(for: error)
             }
@@ -190,6 +199,7 @@ final class FaceTestModel: ObservableObject {
 
     private func capture(template: EnrollmentTemplate, analyze: EnrollmentImageAnalyzer, mode: FaceComparisonMode) async throws -> Completed {
         var window = try FaceComparisonWindow(template: template, mode: mode)
+        var passiveWindow = PassivePADEvaluationWindow()
         var timings: [Double] = []
         var firstFrameTime: Double?
         let capture = services.makeCamera()
@@ -224,7 +234,7 @@ final class FaceTestModel: ObservableObject {
                     try checkCapture()
                     // Slow/stale inference never contributes a score to a fresh temporal window.
                     guard services.now() - time <= 0.75, services.now() >= time else {
-                        window.interrupt(); timings.removeAll(); update(window)
+                        window.interrupt(); passiveWindow.reset(); clearPassiveResult(); timings.removeAll(); update(window)
                         status = "The camera analysis is catching up. Hold still and try brighter light."
                         rejectedFrameCount += 1; lastAcquisitionFeedback = status
                         continue
@@ -232,12 +242,21 @@ final class FaceTestModel: ObservableObject {
                     guard let metrics = analysis.enrollmentMetrics else { throw RecognitionError.poseUnavailable }
                     if let hint = FaceComparisonWindow.adjustment(for: metrics) {
                         rejectedFrameCount += 1; lastAcquisitionFeedback = hint
-                        window.interrupt(); timings.removeAll(); update(window); status = hint
+                        window.interrupt(); passiveWindow.reset(); clearPassiveResult(); timings.removeAll(); update(window); status = hint
                         continue
                     }
                     let before = window.count
+                    let generation = window.continuityGeneration
                     let completed = try window.observe(analysis.embedding, metrics: metrics, at: time)
                     if window.count < before { timings.removeAll() }
+                    if window.continuityGeneration != generation { passiveWindow.reset(); clearPassiveResult() }
+                    passiveScores = analysis.passivePAD
+                    passiveDecision = passiveWindow.observe(analysis.passivePAD, at: time)
+                    if analysis.passivePAD != nil { passivePredictions += 1 }
+                    if passiveDecision == .liveCandidate { passiveEverLive = true }
+                    if passiveDecision == .liveCandidate, passiveCandidateMilliseconds == nil {
+                        passiveCandidateMilliseconds = max(0, (services.now() - (firstFrameTime ?? time)) * 1000)
+                    }
                     timings.append((services.now() - time) * 1000)
                     if timings.count > mode.requiredFrames { timings.removeFirst() }
                     update(window)
@@ -253,7 +272,7 @@ final class FaceTestModel: ObservableObject {
                     }
                 } catch let error as RecognitionError {
                     rejectedFrameCount += 1
-                    window.interrupt(); timings.removeAll(); update(window)
+                    window.interrupt(); passiveWindow.reset(); clearPassiveResult(); timings.removeAll(); update(window)
                     switch error {
                     case .noFace: status = "Bring your face into view. Look toward the camera."
                     case .multipleFaces: status = "Keep only one face in the camera view."
@@ -269,6 +288,10 @@ final class FaceTestModel: ObservableObject {
             camera = nil; clearPreview()
             throw error
         }
+    }
+
+    private func clearPassiveResult() {
+        passiveScores = nil; passiveDecision = .unavailable; passiveCandidateMilliseconds = nil
     }
 
     private func update(_ window: FaceComparisonWindow) {
@@ -332,7 +355,7 @@ final class FaceTestModel: ObservableObject {
         operation?.cancel(); camera?.stop()
         watchdog?.cancel(); watchdog = nil
         captureDeadline?.cancel(); captureDeadline = nil
-        clearPreview(); result = nil; latestSimilarity = nil; sampleCount = 0
+        clearPreview(); clearPassiveResult(); result = nil; latestSimilarity = nil; sampleCount = 0
         vault.lock()
         self.phase = phase; status = message
     }

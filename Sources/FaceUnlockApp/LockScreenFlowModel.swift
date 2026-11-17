@@ -67,6 +67,19 @@ final class LockScreenFlowModel: ObservableObject {
     private var inputConsumed = false
     private var activeMode = "off"
     private var evidenceAgeMilliseconds: Double?
+    var failureCaption: String? {
+        guard let failure else { return nil }
+        guard failure == .liveness else { return failure.caption }
+        let capture = services.captureDiagnostics()
+        if capture.livenessCue == "passivePair" {
+            return capture.livenessDecision == "rejected" ? "Photo or screen suspected" : "Liveness uncertain"
+        }
+        if capture.livenessDecision == "rejected" {
+            if capture.livenessCue == "deviceDetected" { return "Screen shape detected" }
+            if capture.livenessCue == "glossGlare" { return "Screen glare detected" }
+        }
+        return failure.caption
+    }
     private var shouldSubmit: Bool { isAutomaticAttempt ? automaticUnlockEnabled : submissionEnabled }
     private var observers: [LockFlowNotificationToken] = []
 
@@ -383,7 +396,7 @@ final class LockScreenFlowModel: ObservableObject {
             try Task.checkCancellation(); try checkScanning()
             guard shouldSubmit else {
                 let message = result.comparison == .similar
-                    ? "Face looks similar. Scan-only test complete; identity calibration and liveness are unfinished. No password entered."
+                    ? "Face looks similar and experimental liveness passed. Scan-only test complete; biometric accuracy and spoof resistance are unverified. No password entered."
                     : "Face not verified. No password entered. Use password or Touch ID."
                 finish(.fallback, message, failure: result.comparison == .similar ? .scanOnly : .identity)
                 return
@@ -392,7 +405,9 @@ final class LockScreenFlowModel: ObservableObject {
                 guard result.verification.identity == .experimentalMatch || result.verification.identity == .verified else {
                     throw FaceUnlockAttemptError.identity
                 }
-                guard result.verification.liveness != .rejected else { throw FaceUnlockAttemptError.liveness }
+                guard result.verification.liveness == .experimentalLiveness || result.verification.liveness == .verified else {
+                    throw FaceUnlockAttemptError.liveness
+                }
             } else {
                 guard result.verification.identity == .verified else { throw FaceUnlockAttemptError.identity }
                 guard result.verification.liveness == .verified else { throw FaceUnlockAttemptError.liveness }
@@ -438,7 +453,7 @@ final class LockScreenFlowModel: ObservableObject {
                 clearAutomaticSession()
             }
             if phase != .canceled && phase != .fallback {
-                finish(.fallback, error is CancellationError ? "Test canceled." : error.localizedDescription, failure: .classify(error))
+                finish(.fallback, failureMessage(error), failure: .classify(error))
             }
         }
     }
@@ -497,7 +512,10 @@ final class LockScreenFlowModel: ObservableObject {
         }
         try attempt.checkTime(services.now())
         if phase == .scanning, let started = attempt.scanStartedAt,
-           services.now() - started >= 6 { throw FaceUnlockAttemptError.expired }
+           services.now() - started >= 6 {
+            if services.captureDiagnostics().livenessWaitFrames > 0 { throw FaceUnlockAttemptError.liveness }
+            throw FaceUnlockAttemptError.expired
+        }
         try attempt.checkSession(services.snapshot(), uptime: services.uptime())
         if shouldSubmit && !services.credentialsReady() { throw FaceUnlockAttemptError.credentials }
     }
@@ -515,8 +533,26 @@ final class LockScreenFlowModel: ObservableObject {
             services.stopCamera(); vault.lock()
             if automaticUnlockEnabled && !services.credentialsReady() { clearAutomaticSession() }
             if !automaticUnlockEnabled { services.revokeCredentials() }
-            finish(.fallback, error.localizedDescription, failure: .classify(error))
+            finish(.fallback, failureMessage(error), failure: .classify(error))
         }
+    }
+
+    private func failureMessage(_ error: any Error) -> String {
+        if error is CancellationError { return "Test canceled." }
+        guard error as? FaceUnlockAttemptError == .liveness else { return error.localizedDescription }
+        let capture = services.captureDiagnostics()
+        if capture.livenessCue == "passivePair" {
+            return "The passive liveness models did not both pass. No password was entered. Use password or Touch ID."
+        }
+        if capture.livenessDecision == "rejected" {
+            if capture.livenessCue == "deviceDetected" {
+                return "A screen-shaped rectangle was detected around your face. No password was entered. Use password or Touch ID."
+            }
+            if capture.livenessCue == "glossGlare" {
+                return "Screen-like glare was detected over your face. No password was entered. Use password or Touch ID."
+            }
+        }
+        return error.localizedDescription
     }
 
     private func startWatchdog() {

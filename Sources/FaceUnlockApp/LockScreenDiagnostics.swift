@@ -5,11 +5,16 @@ import FaceUnlockMac
 import FaceUnlockRecognition
 
 enum LockScreenCaptureIssue: String, Codable, Sendable {
-    case starting, usable, noFace, multipleFaces, pose, quality, staleAnalysis, different, borderline
+    case starting, usable, noFace, multipleFaces, pose, quality, staleAnalysis, different, borderline, liveness
 }
 
 struct LockScreenCaptureDiagnostics: Codable, Sendable {
     var requiredMatchFrames: Int?
+    var livenessMode: String?
+    var livenessDecision: String?
+    var livenessCue: String?
+    var deviceRectangles: DeviceRectangleDiagnostics?
+    var livenessWaitFrames = 0
     var passwordFieldWaitFrames = 0
     var scheduledOutFrames = 0
     var cameraStartupMilliseconds: Double?

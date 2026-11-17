@@ -4,6 +4,10 @@ Inspected November 10, 2026, at the owner's request: [jonnyoo/glance](https://gi
 
 The video segment shows lid opening, a notch scanning animation, then a checkmark/desktop. It shows the intended no-gesture experience. It does not establish a worst-case recognition time, liveness mode, software revision, accuracy or attack resistance. The local movie remains outside the repository; review frames were generated only in the temporary directory.
 
+## 0.13.0 integration
+
+At the owner’s request after a selfie bypass, the app now adapts Glance Heavy from the pinned `b97f521397ec1197ba17768ba797cae1e628848d` source. Positive heuristic liveness is mandatory for the experimental unlock permit; there is no Light/off setting. The five cues, lifecycle/freshness adaptations, MIT attribution, automated checks and remaining live acceptance are described in [the liveness implementation notes](LIVENESS.md). This does not establish Face ID equivalence or reliable photo/video rejection.
+
 ## What its code does
 
 - A reusable pipeline owns its embedder. Fresh camera-frame IDs prevent reprocessing a duplicate frame. Recognition work is dispatched away from the main actor; the scan loop waits briefly for new frames. Identity scoring uses an averaged enrolled template and closest individual sample, both checked against a configured threshold. There is no mandatory prompted blink or our fixed 12-frame identity requirement. See [pipeline/scoring](https://github.com/jonnyoo/glance/blob/main/glance/FaceRecognitionPipeline.swift) and [scan loop](https://github.com/jonnyoo/glance/blob/main/glance/FaceUnlockCoordinator.swift#L296).

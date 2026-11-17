@@ -27,14 +27,16 @@ private final class HiddenScanFixture {
     let camera = HiddenCamera()
     var time = 100.0
     var noFace = false
+    var passiveScores: PassivePADScores? = try? PassivePADScores(nearLive: 0.99, wideLive: 0.99, inferenceMilliseconds: 5)
     var score = 1.0
     var deadline: Double?
     var analysisCount = 0
     var canScan = true
+    var livenessFrame: ((Int) -> LivenessFrame?) = { LivenessFixtures.blinkingFrame($0) }
     var scanner: LockScreenFaceScanner!
     let template: EnrollmentTemplate
     let analysis: FaceAnalysis
-    init(mode: FaceComparisonMode = .standard) throws {
+    init(mode: FaceComparisonMode = .standard, livenessMode: LockScreenLivenessMode = .heavy) throws {
         var values = [Float](repeating: 0, count: 512); values[0] = 1
         let embedding = try FaceEmbedding(raw: values, modelIdentifier: "hidden-test")
         template = try EnrollmentTemplate(embeddings: Array(repeating: embedding, count: 18), modelIdentifier: "hidden-test")
@@ -49,11 +51,12 @@ private final class HiddenScanFixture {
                 var values = [Float](repeating: 0, count: 512)
                 values[0] = Float(self.score); values[1] = Float(sqrt(1 - self.score * self.score))
                 return FaceAnalysis(embedding: try FaceEmbedding(raw: values, modelIdentifier: "hidden-test"),
-                    quality: self.analysis.quality, inferenceMilliseconds: 1, enrollmentMetrics: self.analysis.enrollmentMetrics)
+                    quality: self.analysis.quality, inferenceMilliseconds: 1, enrollmentMetrics: self.analysis.enrollmentMetrics,
+                    livenessFrame: self.livenessFrame(self.analysisCount), passivePAD: self.passiveScores)
             }
         }, requestPermission: { true }, permissionDenied: { false }, makeCamera: { [unowned self] in camera }, now: { 0 })
         // A separate continuous-time clock binds evidence to the unlock permit, not capture uptime.
-        scanner = LockScreenFaceScanner(services: services, mode: mode, now: { [unowned self] in time })
+        scanner = LockScreenFaceScanner(services: services, mode: mode, livenessMode: livenessMode, now: { [unowned self] in time })
     }
 
     func check() throws {
@@ -75,6 +78,188 @@ private final class HiddenScanFixture {
 
 final class LockScreenScannerTests: XCTestCase {
     @MainActor
+    func testPassiveUnlockAcceptsStillFaceWithoutHeavyMeasurements() async throws {
+        let fixture = try HiddenScanFixture(mode: .shortEvaluation, livenessMode: .passive)
+        fixture.livenessFrame = { _ in nil }
+        var requests = 0
+        try await fixture.scanner.prepare()
+        let scan = Task { try await fixture.scanner.scan(template: fixture.template, attemptID: UUID(), check: fixture.check,
+            readyToReturn: { requests += 1; return true }) }
+        for _ in 0..<100 { await Task.yield() }
+        try await fixture.send(6)
+        fixture.camera.stop()
+        let result = try await scan.value
+        XCTAssertEqual(requests, 1)
+        XCTAssertEqual(result.verification.liveness, .experimentalLiveness)
+        XCTAssertEqual(fixture.scanner.diagnostics.livenessMode, "passive-pair")
+        XCTAssertLessThanOrEqual(fixture.time - result.verification.observedAt, 0.75)
+    }
+
+    @MainActor
+    func testPassiveUnlockBlocksUncertainMissingAndSpoofEvenWithHeavyBlink() async throws {
+        for scores in [nil,
+            try PassivePADScores(nearLive: 0.99, wideLive: 0.5, inferenceMilliseconds: 5),
+            try PassivePADScores(nearLive: 0.01, wideLive: 0.01, inferenceMilliseconds: 5)] {
+            let fixture = try HiddenScanFixture(mode: .shortEvaluation, livenessMode: .passive)
+            fixture.passiveScores = scores
+            var requests = 0
+            try await fixture.scanner.prepare()
+            let scan = Task { try await fixture.scanner.scan(template: fixture.template, attemptID: UUID(), check: fixture.check,
+                readyToReturn: { requests += 1; return true }) }
+            for _ in 0..<100 { await Task.yield() }
+            try await fixture.send(8)
+            fixture.camera.stop()
+            do { _ = try await scan.value; XCTFail("Nonpassing passive evidence authorized input") }
+            catch { XCTAssertEqual(error as? FaceUnlockAttemptError, .liveness) }
+            XCTAssertEqual(requests, 0)
+        }
+    }
+
+    @MainActor
+    func testPassiveFieldWaitCannotReuseLiveResultAfterScoreBecomesUncertain() async throws {
+        let fixture = try HiddenScanFixture(mode: .shortEvaluation, livenessMode: .passive)
+        var requests = 0
+        try await fixture.scanner.prepare()
+        let scan = Task { try await fixture.scanner.scan(template: fixture.template, attemptID: UUID(), check: fixture.check,
+            readyToReturn: { requests += 1; return false }) }
+        for _ in 0..<100 { await Task.yield() }
+        try await fixture.send(6)
+        XCTAssertEqual(requests, 1)
+        fixture.passiveScores = try PassivePADScores(nearLive: 0.99, wideLive: 0.4, inferenceMilliseconds: 5)
+        try await fixture.send(4)
+        fixture.camera.stop()
+        do { _ = try await scan.value; XCTFail("Old passive match was reused") }
+        catch { XCTAssertEqual(error as? FaceUnlockAttemptError, .liveness) }
+        XCTAssertEqual(requests, 1)
+    }
+
+    @MainActor
+    func testPassivePreparationCannotConsumeStaleCombinedEvidence() async throws {
+        let fixture = try HiddenScanFixture(mode: .shortEvaluation, livenessMode: .passive)
+        var delay = true
+        try await fixture.scanner.prepare()
+        let scan = Task { try await fixture.scanner.scan(template: fixture.template, attemptID: UUID(), check: fixture.check,
+            readyToReturn: { if delay { fixture.time += 0.5; delay = false }; return true }) }
+        for _ in 0..<100 { await Task.yield() }
+        try await fixture.send(6)
+        XCTAssertFalse(fixture.camera.stopped)
+        try await fixture.send(6)
+        fixture.camera.stop()
+        let result = try await scan.value
+        XCTAssertLessThanOrEqual(fixture.time - result.verification.observedAt, 0.75)
+        XCTAssertEqual(fixture.scanner.diagnostics.rejectionCounts["staleAnalysis"], 1)
+    }
+
+
+    @MainActor
+    func testPreparationCannotAgeLivenessPastFreshnessEvenWithAFreshIdentityFrame() async throws {
+        let fixture = try HiddenScanFixture(mode: .shortEvaluation)
+        var delay = true
+        try await fixture.scanner.prepare()
+        let scan = Task {
+            try await fixture.scanner.scan(template: fixture.template, attemptID: UUID(), check: fixture.check,
+                readyToReturn: {
+                    if delay { fixture.time += 0.5; delay = false }
+                    return true
+                })
+        }
+        for _ in 0..<100 { await Task.yield() }
+        try await fixture.send(6)
+        XCTAssertFalse(fixture.camera.stopped, "The identity frame is only 500 ms old but its liveness cue is stale")
+        XCTAssertEqual(fixture.scanner.diagnostics.rejectionCounts["staleAnalysis"], 1)
+        try await fixture.send(6)
+        fixture.camera.stop()
+        let result = try await scan.value
+        XCTAssertLessThanOrEqual(fixture.time - result.verification.observedAt, FaceUnlockAttempt.evidenceMaximumAge)
+    }
+
+
+    @MainActor
+    func testMatchingPhotoOrMissingLivenessNeverOpensPasswordPrompt() async throws {
+        for missing in [false, true] {
+            let fixture = try HiddenScanFixture(mode: .shortEvaluation)
+            fixture.livenessFrame = { _ in missing ? nil : LivenessFixtures.frame() }
+            var requests = 0
+            try await fixture.scanner.prepare()
+            let scan = Task {
+                try await fixture.scanner.scan(template: fixture.template, attemptID: UUID(), check: fixture.check,
+                    readyToReturn: { requests += 1; return true })
+            }
+            for _ in 0..<100 { await Task.yield() }
+            try await fixture.send(12)
+            fixture.camera.stop()
+            do { _ = try await scan.value; XCTFail("A photo or missing liveness authorized input") }
+            catch { XCTAssertEqual(error as? FaceUnlockAttemptError, .liveness) }
+            XCTAssertEqual(requests, 0)
+            XCTAssertGreaterThan(fixture.scanner.diagnostics.livenessWaitFrames, 0)
+        }
+    }
+
+    @MainActor
+    func testDeviceCueRejectsBeforePromptEvenWithAMatchingBlinkingFace() async throws {
+        let fixture = try HiddenScanFixture(mode: .shortEvaluation)
+        fixture.livenessFrame = { i in LivenessFixtures.frame(eye: i == 2 ? 0.1 : 0.3, overlap: 0.9) }
+        var requests = 0
+        try await fixture.scanner.prepare()
+        let scan = Task {
+            try await fixture.scanner.scan(template: fixture.template, attemptID: UUID(), check: fixture.check,
+                readyToReturn: { requests += 1; return true })
+        }
+        for _ in 0..<100 { await Task.yield() }
+        try await fixture.send(6)
+        fixture.camera.stop()
+        do { _ = try await scan.value; XCTFail("Device cue was ignored") }
+        catch { XCTAssertEqual(error as? FaceUnlockAttemptError, .liveness) }
+        XCTAssertEqual(requests, 0)
+        XCTAssertEqual(fixture.scanner.diagnostics.livenessCue, "deviceDetected")
+    }
+
+    @MainActor
+    func testTrackingBreakCannotCarryLiveEvidenceIntoAMatchingPhoto() async throws {
+        for detectionLoss in [true, false] {
+            let fixture = try HiddenScanFixture(mode: .shortEvaluation)
+            var requests = 0
+            try await fixture.scanner.prepare()
+            let scan = Task {
+                try await fixture.scanner.scan(template: fixture.template, attemptID: UUID(), check: fixture.check,
+                    readyToReturn: { requests += 1; return false })
+            }
+            for _ in 0..<100 { await Task.yield() }
+            try await fixture.send(6)
+            XCTAssertEqual(requests, 1)
+            if detectionLoss { fixture.noFace = true } else { fixture.score = 0.1 }
+            try await fixture.send(1)
+            fixture.noFace = false; fixture.score = 1
+            fixture.livenessFrame = { _ in LivenessFixtures.frame() }
+            try await fixture.send(6)
+            fixture.camera.stop()
+            do { _ = try await scan.value; XCTFail("Tracking break reused liveness") }
+            catch { XCTAssertEqual(error as? FaceUnlockAttemptError, .liveness) }
+            XCTAssertEqual(requests, 1, "The matching photo must not invoke input readiness again")
+        }
+    }
+
+    @MainActor
+    func testDenyCueDuringFieldWaitStillPreventsSubmission() async throws {
+        let fixture = try HiddenScanFixture(mode: .shortEvaluation)
+        var requests = 0
+        try await fixture.scanner.prepare()
+        let scan = Task {
+            try await fixture.scanner.scan(template: fixture.template, attemptID: UUID(), check: fixture.check,
+                readyToReturn: { requests += 1; return false })
+        }
+        for _ in 0..<100 { await Task.yield() }
+        try await fixture.send(6)
+        XCTAssertEqual(requests, 1)
+        fixture.livenessFrame = { _ in LivenessFixtures.frame(overlap: 0.9) }
+        try await fixture.send(3, interval: 0.1)
+        fixture.camera.stop()
+        do { _ = try await scan.value; XCTFail("Late device cue was ignored") }
+        catch { XCTAssertEqual(error as? FaceUnlockAttemptError, .liveness) }
+        XCTAssertEqual(fixture.scanner.diagnostics.livenessCue, "deviceDetected")
+    }
+
+    @MainActor
     func testSixFrameTrialWaitsForSixDistinctFramesAndKeepsEvidenceExperimental() async throws {
         let fixture = try HiddenScanFixture(mode: .shortEvaluation)
         try await fixture.scanner.prepare()
@@ -87,7 +272,7 @@ final class LockScreenScannerTests: XCTestCase {
         let result = try await scan.value
         XCTAssertEqual(result.comparison, .similar)
         XCTAssertEqual(result.verification.identity, .experimentalMatch)
-        XCTAssertEqual(result.verification.liveness, .unavailable)
+        XCTAssertEqual(result.verification.liveness, .experimentalLiveness)
         XCTAssertEqual(fixture.analysisCount, 6)
         XCTAssertEqual(fixture.scanner.diagnostics.requiredMatchFrames, 6)
         XCTAssertEqual(try XCTUnwrap(fixture.scanner.diagnostics.scanMilliseconds), 750, accuracy: 0.01)
@@ -137,7 +322,7 @@ final class LockScreenScannerTests: XCTestCase {
             try await fixture.send(1)
             fixture.camera.stop()
             let result = try await scan.value
-            XCTAssertEqual(result.verification.observedAt, fixture.time, accuracy: 1e-6)
+            XCTAssertTrue((0...FaceUnlockAttempt.evidenceMaximumAge).contains(fixture.time - result.verification.observedAt))
             XCTAssertEqual(requests, 2)
         }
     }
@@ -167,7 +352,7 @@ final class LockScreenScannerTests: XCTestCase {
         try await fixture.send(1)
         fixture.camera.stop()
         let result = try await scan.value
-        XCTAssertEqual(result.verification.observedAt, fixture.time, accuracy: 1e-6)
+        XCTAssertTrue((0...FaceUnlockAttempt.evidenceMaximumAge).contains(fixture.time - result.verification.observedAt))
         XCTAssertEqual(readyChecks, 2)
     }
 
@@ -190,7 +375,7 @@ final class LockScreenScannerTests: XCTestCase {
         try await fixture.send(12)
         fixture.camera.stop()
         let result = try await scan.value
-        XCTAssertEqual(result.verification.observedAt, fixture.time, accuracy: 1e-6)
+        XCTAssertTrue((0...FaceUnlockAttempt.evidenceMaximumAge).contains(fixture.time - result.verification.observedAt))
     }
 
     @MainActor
@@ -199,14 +384,14 @@ final class LockScreenScannerTests: XCTestCase {
         try await fixture.scanner.prepare()
         let scan = Task { try await fixture.scanner.scan(template: fixture.template, attemptID: UUID(), check: fixture.check) }
         for _ in 0..<100 { await Task.yield() }
-        try await fixture.send(56, interval: 1.0 / 30)
+        try await fixture.send(90, interval: 1.0 / 30)
         fixture.camera.stop()
         let result = try await scan.value
         XCTAssertEqual(result.comparison, .similar)
-        XCTAssertEqual(fixture.analysisCount, 12)
-        XCTAssertEqual(fixture.scanner.diagnostics.scheduledOutFrames, 44)
+        XCTAssertGreaterThan(fixture.analysisCount, 12, "Liveness needs a faster cadence than identity votes")
+        XCTAssertGreaterThan(fixture.scanner.diagnostics.scheduledOutFrames, 0)
         XCTAssertNotNil(fixture.scanner.diagnostics.cameraStartupMilliseconds)
-        XCTAssertEqual(try XCTUnwrap(fixture.scanner.diagnostics.scanMilliseconds), 11.0 / 6 * 1000, accuracy: 0.01)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(fixture.scanner.diagnostics.scanMilliseconds), 1_650)
     }
 
     @MainActor
@@ -223,9 +408,9 @@ final class LockScreenScannerTests: XCTestCase {
         let result = try await scan.value
         XCTAssertEqual(result.comparison, .similar)
         XCTAssertEqual(result.verification.identity, .experimentalMatch)
-        XCTAssertEqual(result.verification.liveness, .unavailable)
+        XCTAssertEqual(result.verification.liveness, .experimentalLiveness)
         XCTAssertEqual(result.verification.attemptID, id)
-        XCTAssertEqual(result.verification.observedAt, fixture.time, accuracy: 1e-6)
+        XCTAssertTrue((0...FaceUnlockAttempt.evidenceMaximumAge).contains(fixture.time - result.verification.observedAt))
         XCTAssertTrue(fixture.camera.stopped)
     }
 
@@ -309,7 +494,7 @@ final class LockScreenScannerTests: XCTestCase {
         fixture.camera.stop()
         let result = try await scan.value
         XCTAssertEqual(fixture.camera.joins, 0)
-        XCTAssertEqual(result.verification.observedAt, fixture.time, accuracy: 1e-6)
+        XCTAssertTrue((0...FaceUnlockAttempt.evidenceMaximumAge).contains(fixture.time - result.verification.observedAt))
         await fixture.scanner.finish()
         XCTAssertEqual(fixture.camera.joins, 1)
         XCTAssertGreaterThan(fixture.time - result.verification.observedAt, FaceUnlockAttempt.evidenceMaximumAge)

@@ -18,6 +18,7 @@ public enum ArcFaceContract {
 public enum RecognitionError: Error, LocalizedError {
     case missingModel, contract, reference, prediction, pixels, image, noFace, multipleFaces, landmarks
     case poseUnavailable, captureQualityUnavailable
+    case missingPassivePAD, passivePADContract, passivePADReference
     public var errorDescription: String? {
         switch self {
         case .missingModel: "ArcFace is missing. Fetch, validate and compile the pinned model before testing."
@@ -31,6 +32,9 @@ public enum RecognitionError: Error, LocalizedError {
         case .landmarks: "Five usable landmarks were not found. A loose crop will not be used."
         case .poseUnavailable: "The camera detected your face but could not measure its angle. Face the camera and try a small head movement."
         case .captureQualityUnavailable: "The camera detected your face but could not measure capture quality. Try even light and keep your face visible."
+        case .missingPassivePAD: "The passive liveness evaluation model is missing. Rebuild the app with its validated assets."
+        case .passivePADContract: "The passive liveness model or input/output contract is incompatible."
+        case .passivePADReference: "Passive liveness numerical validation failed. Evaluation is disabled."
         }
     }
 }
@@ -52,6 +56,17 @@ public struct FaceAnalysis: Sendable {
     public let quality: Float?
     public let inferenceMilliseconds: Double
     public let enrollmentMetrics: EnrollmentMetrics?
+    public let livenessFrame: LivenessFrame?
+    public let passivePAD: PassivePADScores?
+
+    public init(embedding: FaceEmbedding, quality: Float?, inferenceMilliseconds: Double,
+                enrollmentMetrics: EnrollmentMetrics?, livenessFrame: LivenessFrame? = nil,
+                passivePAD: PassivePADScores? = nil) {
+        self.embedding = embedding; self.quality = quality
+        self.inferenceMilliseconds = inferenceMilliseconds; self.enrollmentMetrics = enrollmentMetrics
+        self.livenessFrame = livenessFrame
+        self.passivePAD = passivePAD
+    }
 }
 
 /// No dependency on credential storage or password submission. The model is actor-confined.
@@ -62,6 +77,8 @@ public actor ArcFaceRecognizer {
     private var validated = false
     private var captureReference: URL?
     private var captureReport: RecognitionCheckReport?
+    private var passivePAD: PassivePADModel?
+    private var passivePADReference: URL?
     private let context = CIContext(options: [.cacheIntermediates: false])
 
     public init(modelURL: URL) { self.modelURL = modelURL }
@@ -142,6 +159,14 @@ public actor ArcFaceRecognizer {
         return report
     }
 
+    public func preparePassivePAD(modelURL: URL, referenceURL: URL) throws {
+        if passivePAD != nil, passivePADReference == referenceURL.standardizedFileURL { return }
+        passivePAD = nil; passivePADReference = nil
+        let candidate = try PassivePADModel(url: modelURL)
+        try candidate.validate(referenceURL: referenceURL)
+        passivePAD = candidate; passivePADReference = referenceURL.standardizedFileURL
+    }
+
     public func analyzeImage(at url: URL) throws -> FaceAnalysis {
         guard validated else { throw RecognitionError.reference }
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
@@ -155,15 +180,22 @@ public actor ArcFaceRecognizer {
     }
 
     /// Camera and selected-image analysis share exactly the same detection/alignment/model path.
-    public func analyze(_ image: CGImage) throws -> FaceAnalysis {
+    public func analyze(_ image: CGImage, includeLiveness: Bool = false, includePassivePAD: Bool = false) throws -> FaceAnalysis {
         guard validated else { throw RecognitionError.reference }
         try Task.checkCancellation()
-        let prepared = try FaceImageProcessor.prepare(image, context: context)
+        let prepared = try FaceImageProcessor.prepare(image, context: context, includeLiveness: includeLiveness)
         let start = ProcessInfo.processInfo.systemUptime
         let embedding = try predict(prepared.pixels, model: load())
+        let pad: PassivePADScores?
+        if includePassivePAD {
+            guard let passivePAD, let bounds = prepared.metrics.faceBounds else { throw RecognitionError.missingPassivePAD }
+            let box = CGRect(x: bounds.x * Double(image.width), y: bounds.y * Double(image.height),
+                width: bounds.width * Double(image.width), height: bounds.height * Double(image.height))
+            pad = try passivePAD.analyze(image, face: box)
+        } else { pad = nil }
         return FaceAnalysis(embedding: embedding, quality: prepared.quality,
                             inferenceMilliseconds: (ProcessInfo.processInfo.systemUptime - start) * 1000,
-                            enrollmentMetrics: prepared.metrics)
+                            enrollmentMetrics: prepared.metrics, livenessFrame: prepared.liveness, passivePAD: pad)
     }
 
     private func predict(_ pixels: CVPixelBuffer, model: MLModel) throws -> FaceEmbedding {

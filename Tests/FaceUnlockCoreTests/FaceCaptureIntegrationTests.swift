@@ -54,6 +54,59 @@ final class FaceCaptureIntegrationTests: XCTestCase {
         XCTAssertTrue((0...1).contains(metrics.quality))
     }
 
+    func testNativeLivenessExtractionFromSameFaceDoesNotTreatAStillImageAsAlive() throws {
+        let image = try fixture()
+        let prepared = try FaceImageProcessor.prepare(image,
+            context: CIContext(options: [.cacheIntermediates: false]), includeLiveness: true)
+        let frame = try XCTUnwrap(prepared.liveness)
+        XCTAssertFalse(frame.landmarks.isEmpty)
+        XCTAssertNotNil(frame.deviceOverlapFraction)
+        XCTAssertNotNil(frame.glare)
+        XCTAssertTrue(frame.landmarks.allSatisfy {
+            (0...CGFloat(image.width)).contains($0.point.x) && (0...CGFloat(image.height)).contains($0.point.y)
+        })
+        var gate = HeavyLivenessGate()
+        for i in 0..<20 {
+            let result = gate.observe(frame, at: 100 + Double(i) * 0.05)
+            XCTAssertNotEqual(result, .passed, "Repeated photo measurements cannot supply liveness")
+        }
+    }
+
+    func testTranslatedAndBrightnessChangedPhotoDoesNotSupplyLiveness() throws {
+        let image = try fixture()
+        let source = CIImage(cgImage: image)
+        let context = CIContext(options: [.cacheIntermediates: false])
+        var gate = HeavyLivenessGate()
+        for i in 0..<12 {
+            let moved = source.transformed(by: CGAffineTransform(translationX: Double(i % 3 - 1) * 4,
+                                                                  y: Double(i % 2) * 2))
+                .applyingFilter("CIColorControls", parameters: ["inputBrightness": Double(i % 3) * 0.01])
+            let input = try XCTUnwrap(context.createCGImage(moved, from: source.extent))
+            let prepared = try FaceImageProcessor.prepare(input, context: context, includeLiveness: true)
+            XCTAssertNotEqual(gate.observe(try XCTUnwrap(prepared.liveness), at: 100 + Double(i) * 0.1), .passed)
+        }
+    }
+
+    func testNativeRectangleDetectorMeasuresOverlapAroundFaceRegion() throws {
+        let context = try XCTUnwrap(CGContext(data: nil, width: 400, height: 400, bitsPerComponent: 8,
+            bytesPerRow: 1_600, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(gray: 0, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: 400, height: 400))
+        context.setFillColor(gray: 1, alpha: 1)
+        context.fill(CGRect(x: 80, y: 40, width: 240, height: 320))
+        let image = try XCTUnwrap(context.makeImage())
+        for (face, isDevice) in [
+            (CGRect(x: 130, y: 130, width: 140, height: 140), true),
+            (CGRect(x: 180, y: 180, width: 40, height: 40), false), // Large background rectangle.
+            (CGRect(x: 290, y: 130, width: 140, height: 140), false) // Only partial overlap.
+        ] {
+            let overlap = try XCTUnwrap(LivenessFeatureExtractor.deviceOverlap(in: image, face: face))
+            if isDevice { XCTAssertGreaterThan(overlap, 0.9) }
+            else { XCTAssertEqual(overlap, 0) }
+        }
+    }
+
     func testNativePipelineComparesBrightnessVariantsThroughTemporalPolicy() async throws {
         guard let modelPath = ProcessInfo.processInfo.environment["FACEUNLOCK_TEST_MODEL_PATH"] else {
             throw XCTSkip("Native Core ML integration is opt-in")

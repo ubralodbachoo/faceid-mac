@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "modelIdentifier": "minivision-minifasnet-pair-b6d5f04-fp32-v1",
+  "sourceRevision": "b6d5f04ad78778917853b25c778acef6d5626d15",
+  "upstream": [
+    {
+      "path": "src/model_lib/MiniFASNet.py",
+      "url": "https://raw.githubusercontent.com/minivision-ai/Silent-Face-Anti-Spoofing/b6d5f04ad78778917853b25c778acef6d5626d15/src/model_lib/MiniFASNet.py",
+      "sha256": "e498c4ec5e1ddfaba62b941a126c19d65aa564999f3309661fe43ee8bf38acd7"
+    },
+    {
+      "path": "resources/anti_spoof_models/2.7_80x80_MiniFASNetV2.pth",
+      "url": "https://raw.githubusercontent.com/minivision-ai/Silent-Face-Anti-Spoofing/b6d5f04ad78778917853b25c778acef6d5626d15/resources/anti_spoof_models/2.7_80x80_MiniFASNetV2.pth",
+      "sha256": "a5eb02e1843f19b5386b953cc4c9f011c3f985d0ee2bb9819eea9a142099bec0"
+    },
+    {
+      "path": "resources/anti_spoof_models/4_0_0_80x80_MiniFASNetV1SE.pth",
+      "url": "https://raw.githubusercontent.com/minivision-ai/Silent-Face-Anti-Spoofing/b6d5f04ad78778917853b25c778acef6d5626d15/resources/anti_spoof_models/4_0_0_80x80_MiniFASNetV1SE.pth",
+      "sha256": "84ee1d37d96894d5e82de5a57df044ef80a58be2b218b5ed7cdfd875ec2f5990"
+    },
+    {
+      "path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/minivision-ai/Silent-Face-Anti-Spoofing/b6d5f04ad78778917853b25c778acef6d5626d15/LICENSE",
+      "sha256": "daf94bf1dc9cc5700fe5af2c7c0cbd1836e70d509ed78fd0bebef7432edee6fb"
+    }
+  ],
+  "input": "two planar BGR float32 tensors, 1x3x80x80, raw 0...255, crops at 2.7 and 4.0",
+  "output": "1x2x3 softmax distributions; class 1 is live for each model",
+  "torch": "2.7.0",
+  "coremltools": "9.0",
+  "files": [
+    {
+      "path": "PassivePAD.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+      "sha256": "0becb7308b0e485154f70f18f733cb6a825cf4c66dc0d2b18b4a4a725c2fe1f8"
+    },
+    {
+      "path": "PassivePAD.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+      "sha256": "290400603935be003cea92c5c40c783a350ab7e167fc1bbe32062c55d813a684"
+    },
+    {
+      "path": "PassivePAD.mlpackage/Manifest.json",
+      "sha256": "8a42d56ce8b63434864afa7c5bb9f9ab579f7444ce4238d3427cdc2bbb8e9f6a"
+    },
+    {
+      "path": "PassivePADReference.json",
+      "sha256": "c3aa78f5fa78eea8f6d5175691e2ad923349e26e9d4790a27ea75ab7f2a73898"
+    },
+    {
+      "path": "Minivision-Apache-LICENSE.txt",
+      "sha256": "daf94bf1dc9cc5700fe5af2c7c0cbd1836e70d509ed78fd0bebef7432edee6fb"
+    }
+  ]
+}

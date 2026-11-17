@@ -71,7 +71,7 @@ final class LockScreenIndicator: NSObject {
 
     func observe(_ model: LockScreenFlowModel) {
         observation = model.$phase.sink { [weak self, weak model] phase in
-            self?.update(phase, caption: model?.failure?.caption)
+            self?.update(phase, caption: model?.failureCaption)
         }
     }
 

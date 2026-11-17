@@ -113,6 +113,28 @@ final class FaceTestFlowTests: XCTestCase {
     }
 
     @MainActor
+    func testPassiveTrialRecordsAnyLiveCandidateEvenIfPhotoEndsRejected() async throws {
+        let fixture = try ComparisonFixture()
+        fixture.model.evaluationPresentation = .screen
+        fixture.customAnalysis = { _ in
+            let analysis = try fixture.analysis()
+            let live = fixture.analysisCount <= 4
+            return FaceAnalysis(embedding: analysis.embedding, quality: analysis.quality,
+                inferenceMilliseconds: 1, enrollmentMetrics: analysis.enrollmentMetrics,
+                passivePAD: try PassivePADScores(nearLive: live ? 0.99 : 0.01,
+                    wideLive: live ? 0.99 : 0.01, inferenceMilliseconds: 5))
+        }
+        fixture.model.start()
+        await waitUntil { fixture.model.phase == .capturing }
+        try await fixture.send(12)
+        await waitUntil { !fixture.model.isBusy }
+        XCTAssertEqual(fixture.model.passiveDecision, .spoofCandidate)
+        XCTAssertTrue(fixture.model.passiveEverLive, "A temporary photo acceptance must remain visible")
+        XCTAssertTrue(fixture.model.evaluationTrials.last?.passiveEverLive == true)
+        XCTAssertEqual(fixture.model.passivePredictions, 12)
+    }
+
+    @MainActor
     func testCameraFailureBeforeFirstFrameStillCountsAsIncompleteEvaluation() async throws {
         let fixture = try ComparisonFixture()
         fixture.model.start()

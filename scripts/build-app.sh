@@ -14,6 +14,7 @@ cp "$bin_dir/FaceUnlock" "$app/Contents/MacOS/.FaceUnlock.new"
 mv -f "$app/Contents/MacOS/.FaceUnlock.new" "$app/Contents/MacOS/FaceUnlock"
 cp scripts/Info.plist "$app/Contents/Info.plist"
 mkdir -p "$app/Contents/Resources"
+cp Models/Glance-MIT-LICENSE.txt "$app/Contents/Resources/Glance-MIT-LICENSE.txt"
 if [[ -d Models/ArcFace.mlpackage ]]; then
     python3 tools/check_model_assets.py
     compiled="$PWD/build/compiled-models"
@@ -25,10 +26,19 @@ if [[ -d Models/ArcFace.mlpackage ]]; then
     cp Models/ArcFaceReference.json "$app/Contents/Resources/ArcFaceReference.json"
     cp Models/model-provenance.lock.json "$app/Contents/Resources/ArcFaceProvenance.json"
     cp Models/NOTICE.md "$app/Contents/Resources/ArcFace-NOTICE.md"
-    cp Models/Glance-MIT-LICENSE.txt "$app/Contents/Resources/Glance-MIT-LICENSE.txt"
 else
     # A source-only checkout still builds, but never retains a stale compiled model.
     rm -rf "$app/Contents/Resources/ArcFace.mlmodelc"
+fi
+if [[ -d Models/PassivePAD.mlpackage ]]; then
+    python3 tools/check_passive_pad_assets.py
+    mkdir -p build/compiled-models
+    rm -rf build/compiled-models/PassivePAD.mlmodelc "$app/Contents/Resources/PassivePAD.mlmodelc"
+    xcrun coremlcompiler compile Models/PassivePAD.mlpackage build/compiled-models
+    cp -R build/compiled-models/PassivePAD.mlmodelc "$app/Contents/Resources/PassivePAD.mlmodelc"
+    cp Models/PassivePADReference.json Models/Minivision-Apache-LICENSE.txt "$app/Contents/Resources/"
+else
+    rm -rf "$app/Contents/Resources/PassivePAD.mlmodelc"
 fi
 codesign --force --sign - "$app"
 printf 'Built development app: %s\n' "$app"

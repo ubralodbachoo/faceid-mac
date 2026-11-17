@@ -5,7 +5,8 @@ import Vision
 import FaceUnlockCore
 
 enum FaceImageProcessor {
-    static func prepare(_ image: CGImage, context: CIContext) throws -> (pixels: CVPixelBuffer, quality: Float?, metrics: EnrollmentMetrics) {
+    static func prepare(_ image: CGImage, context: CIContext, includeLiveness: Bool = false) throws
+        -> (pixels: CVPixelBuffer, quality: Float?, metrics: EnrollmentMetrics, liveness: LivenessFrame?) {
         let handler = VNImageRequestHandler(cgImage: image, orientation: .up)
         // Detect with revision 3 FIRST. Supplying that exact face to both following requests
         // avoids implicit legacy detection/cache reuse and keeps pose, quality and landmarks together.
@@ -27,7 +28,8 @@ enum FaceImageProcessor {
         let score = quality.results?.first?.faceCaptureQuality
         let metrics = try captureMetrics(face: face, poseFace: poseFace, quality: score,
                                          width: image.width, height: image.height, luminance: luminance(pixels))
-        return (pixels, score, metrics)
+        let liveness = includeLiveness ? LivenessFeatureExtractor.extract(face: face, pose: poseFace, image: image) : nil
+        return (pixels, score, metrics, liveness)
     }
 
     static func captureMetrics(face: VNFaceObservation, poseFace: VNFaceObservation, quality: Float?,

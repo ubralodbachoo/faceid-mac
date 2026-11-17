@@ -37,8 +37,10 @@ struct EnrollmentCaptureServices {
 
     static var live: Self { live(minimumFrameInterval: 0.09) }
     static var comparison: Self { live(minimumFrameInterval: 0) }
+    static var passiveComparison: Self { live(minimumFrameInterval: 0, includePassivePAD: true) }
+    static var lockScreen: Self { live(minimumFrameInterval: 0, includePassivePAD: true) }
 
-    private static func live(minimumFrameInterval: Double) -> Self {
+    private static func live(minimumFrameInterval: Double, includeLiveness: Bool = false, includePassivePAD: Bool = false) -> Self {
         Self(prepare: {
             guard let model = Bundle.main.url(forResource: "ArcFace", withExtension: "mlmodelc"),
                   let reference = Bundle.main.url(forResource: "ArcFaceReference", withExtension: "json") else {
@@ -47,7 +49,14 @@ struct EnrollmentCaptureServices {
             let recognizer = captureRecognizer ?? ArcFaceRecognizer(modelURL: model)
             captureRecognizer = recognizer
             _ = try await recognizer.prepareForCapture(referenceURL: reference)
-            return { image in try await recognizer.analyze(image) }
+            if includePassivePAD {
+                guard let pad = Bundle.main.url(forResource: "PassivePAD", withExtension: "mlmodelc"),
+                      let padReference = Bundle.main.url(forResource: "PassivePADReference", withExtension: "json") else {
+                    throw RecognitionError.missingPassivePAD
+                }
+                try await recognizer.preparePassivePAD(modelURL: pad, referenceURL: padReference)
+            }
+            return { image in try await recognizer.analyze(image, includeLiveness: includeLiveness, includePassivePAD: includePassivePAD) }
         }, requestPermission: { await EnrollmentCamera.requestPermission() },
            permissionDenied: { AVCaptureDevice.authorizationStatus(for: .video) == .denied },
            makeCamera: { EnrollmentCamera(session: cameraSession, minimumFrameInterval: minimumFrameInterval) }, now: { ProcessInfo.processInfo.systemUptime })

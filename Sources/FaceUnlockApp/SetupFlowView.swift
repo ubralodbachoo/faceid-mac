@@ -137,7 +137,7 @@ struct SetupFlowView: View {
                 Label("Face registered", systemImage: "checkmark.circle.fill")
                 Label("Password saved", systemImage: "checkmark.circle.fill")
             }.foregroundStyle(.secondary)
-            Text("This experimental webcam unlock can be fooled by a photo or video. Password and Touch ID remain available.")
+            Text("Unlocking requires a face match and agreement from both passive liveness models. No blink or head movement is required. These experimental checks may still be fooled by a photo or video. Password and Touch ID remain available.")
                 .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
                 .frame(maxWidth: 440)
             Toggle("I understand that a photo or video may unlock this Mac", isOn: $setup.acknowledgesPhotoRisk)

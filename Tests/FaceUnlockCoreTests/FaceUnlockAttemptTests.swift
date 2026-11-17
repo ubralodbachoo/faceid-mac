@@ -38,7 +38,7 @@ final class FaceUnlockAttemptTests: XCTestCase {
 
     func testIdentityAndLivenessMustBothBeIndependentlyVerified() throws {
         let cases: [(UnlockCheck, UnlockCheck)] = [(.unavailable, .verified), (.rejected, .verified),
-                                                  (.verified, .unavailable), (.verified, .rejected)]
+                                                  (.verified, .unavailable), (.verified, .rejected), (.verified, .experimentalLiveness)]
         for (identity, liveness) in cases {
             var attempt = try scanning()
             XCTAssertThrowsError(try consume(&attempt, identity: identity, liveness: liveness))
@@ -87,21 +87,21 @@ final class FaceUnlockAttemptTests: XCTestCase {
 
     func testExperimentalEvidenceRequiresAnExplicitlyExperimentalPermit() throws {
         var verifiedPermit = try scanning()
-        XCTAssertThrowsError(try consume(&verifiedPermit, identity: .experimentalMatch, liveness: .unavailable))
+        XCTAssertThrowsError(try consume(&verifiedPermit, identity: .experimentalMatch, liveness: .experimentalLiveness))
         var experimental = FaceUnlockAttempt(userID: 501, now: 100, policy: .experimentalSimilarity)
         try experimental.beginScan(now: 101, snapshot: snapshot(), uptime: 10)
-        try consume(&experimental, identity: .experimentalMatch, liveness: .unavailable)
+        try consume(&experimental, identity: .experimentalMatch, liveness: .experimentalLiveness)
         XCTAssertTrue(experimental.consumed)
-        XCTAssertThrowsError(try consume(&experimental, identity: .experimentalMatch, liveness: .unavailable))
+        XCTAssertThrowsError(try consume(&experimental, identity: .experimentalMatch, liveness: .experimentalLiveness))
     }
 
     func testExperimentalPolicyKeepsSessionFreshnessFocusCredentialAndDenyGates() throws {
-        for scenario in 0..<7 {
+        for scenario in 0..<8 {
             var attempt = FaceUnlockAttempt(userID: 501, now: 100, policy: .experimentalSimilarity)
             try attempt.beginScan(now: 101, snapshot: snapshot(), uptime: 10)
             XCTAssertThrowsError(try consume(&attempt,
                 identity: scenario == 0 ? .unavailable : .experimentalMatch,
-                liveness: scenario == 1 ? .rejected : .unavailable,
+                liveness: scenario == 1 ? .rejected : scenario == 7 ? .unavailable : .experimentalLiveness,
                 evidenceTime: scenario == 2 ? 101 : 101.9,
                 attemptID: scenario == 3 ? UUID() : nil,
                 snapshot: scenario == 4 ? snapshot(console: 502) : nil,

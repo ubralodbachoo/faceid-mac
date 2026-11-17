@@ -1,5 +1,6 @@
 import SwiftUI
 import FaceUnlockCore
+import FaceUnlockRecognition
 
 struct FaceTestView: View {
     @ObservedObject var model: FaceTestModel
@@ -42,13 +43,35 @@ struct FaceTestView: View {
                 .frame(maxWidth: 480, minHeight: 38)
                 .accessibilityIdentifier("faceTestFeedback")
 
+            if let scores = model.passiveScores {
+                VStack(spacing: 6) {
+                    Text("Passive liveness trial").font(.headline)
+                    Text(passiveCaption).font(.callout)
+                    Text("Stay naturally still; no blink or head movement is required by this model.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    DisclosureGroup("Model evaluation details") {
+                        Text("Live-class outputs: near crop \(scores.nearLive, specifier: "%.3f") · wide crop \(scores.wideLive, specifier: "%.3f").")
+                        Text("Trial rule: both ≥ 0.900 for three frames. These outputs are not calibrated probabilities of a safe unlock.")
+                        Text("Pair inference: \(scores.inferenceMilliseconds, specifier: "%.1f") ms · \(model.passivePredictions) predictions.")
+                        if let elapsed = model.passiveCandidateMilliseconds {
+                            Text("First live candidate: \(elapsed / 1000, specifier: "%.2f") s after the first camera frame.")
+                        }
+                    }.font(.caption).foregroundStyle(.secondary)
+                    if model.passiveEverLive {
+                        Text("A live candidate appeared during this test. For a photo/video presentation, count this as a failed spoof test.").font(.caption).foregroundStyle(.orange)
+                    }
+                    Text("This camera test never enters a password. Automatic unlocking uses a separate guarded scan.")
+                        .font(.caption).foregroundStyle(.orange)
+                }.frame(maxWidth: 480)
+            }
+
             if let result = model.result {
                 VStack(spacing: 6) {
                     Text("Similarity \(result.medianSimilarity, specifier: "%.3f")")
                         .font(.title3.monospacedDigit())
                     Text("Experimental cutoff: 0.500 · This score is not a probability.")
                         .font(.caption).foregroundStyle(.secondary)
-                    Text("Face comparison only · Liveness unverified")
+                    Text("Face comparison and passive model trial · Spoof resistance unverified")
                         .font(.callout).foregroundStyle(.orange)
                     DisclosureGroup("Comparison details") {
                         Text("\(result.frameCount) frames, each compared with the three closest saved samples. \(result.aboveCutoff) of \(result.frameCount) were at or above the cutoff. Scores ranged from \(result.minimumSimilarity, specifier: "%.3f") to \(result.maximumSimilarity, specifier: "%.3f"). Median analysis: \(model.analysisMilliseconds ?? 0, specifier: "%.0f") ms per frame.")
@@ -100,7 +123,7 @@ struct FaceTestView: View {
                     Text("The candidate never changes automatic unlocking. Test each presentation with both windows. A photo/video match is a spoof acceptance, not a successful authentication.")
                         .font(.caption).foregroundStyle(.secondary)
                     ForEach(Array(model.evaluationTrials.suffix(12).reversed())) { trial in
-                        Text("\(trial.mode == .standard ? "12f" : "6f") · \(trial.presentation.rawValue) · \(trial.outcome?.rawValue ?? "incomplete/canceled") · \(trial.cameraMilliseconds.map { String(format: "%.2fs", $0 / 1000) } ?? "—")")
+                        Text("\(trial.mode == .standard ? "12f" : "6f") · \(trial.presentation.rawValue) · \(trial.outcome?.rawValue ?? "incomplete/canceled") · PAD \(trial.passiveDecision?.rawValue ?? "unavailable") · \(trial.cameraMilliseconds.map { String(format: "%.2fs", $0 / 1000) } ?? "—")")
                             .font(.caption.monospacedDigit())
                     }
                     Text("Last 100 trials kept in memory only. Time includes camera startup and scan; macOS authorization is excluded.")
@@ -117,6 +140,15 @@ struct FaceTestView: View {
             .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
         }
         .padding(24).frame(maxWidth: .infinity)
+    }
+
+    private var passiveCaption: String {
+        switch model.passiveDecision {
+        case .liveCandidate: "Live candidate — test your selfie next"
+        case .spoofCandidate: "Spoof candidate — model rejects this presentation"
+        case .uncertain: "Uncertain — models need stronger or more consistent evidence"
+        case .unavailable: "Passive model data unavailable"
+        }
     }
 
     private var title: String {

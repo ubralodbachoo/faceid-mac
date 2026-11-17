@@ -18,7 +18,7 @@ struct LockScreenFlowView: View {
             Text(model.status).font(.callout).textSelection(.enabled)
                 .accessibilityIdentifier("lockScreenFeedback")
             if let failure = model.failure {
-                Label(failure.caption, systemImage: "exclamationmark.circle")
+                Label(model.failureCaption ?? failure.caption, systemImage: "exclamationmark.circle")
                     .font(.callout).foregroundStyle(.orange)
             }
             HStack {

@@ -2,11 +2,11 @@ import Foundation
 
 /// Authentication evidence is separate from the experimental comparison score.
 /// Experimental comparison matches remain distinct from calibrated identity/PAD verification.
-public enum UnlockCheck: Sendable { case verified, experimentalMatch, rejected, unavailable }
+public enum UnlockCheck: Sendable { case verified, experimentalMatch, experimentalLiveness, rejected, unavailable }
 
 public enum UnlockAuthorizationPolicy: Sendable {
     case verifiedBiometrics
-    /// Requires explicit owner opt-in; photos/video may unlock. Never claims verified liveness.
+    /// Requires explicit owner opt-in and positive heuristic liveness. Photos/video may still unlock.
     case experimentalSimilarity
 }
 
@@ -95,7 +95,9 @@ public struct FaceUnlockAttempt {
             guard verification.identity == .experimentalMatch || verification.identity == .verified else {
                 throw FaceUnlockAttemptError.identity
             }
-            guard verification.liveness != .rejected else { throw FaceUnlockAttemptError.liveness }
+            guard verification.liveness == .experimentalLiveness || verification.liveness == .verified else {
+                throw FaceUnlockAttemptError.liveness
+            }
         }
         guard credentialsReady else { throw FaceUnlockAttemptError.credentials }
         guard focusVerified else { throw FaceUnlockAttemptError.focus }
