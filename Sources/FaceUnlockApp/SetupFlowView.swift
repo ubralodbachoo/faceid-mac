@@ -11,7 +11,9 @@ struct SetupFlowView: View {
     @ObservedObject private var lockScreen: LockScreenFlowModel
     @ObservedObject private var preferences: AppPreferences
     @State private var password = ""
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.appAnimationsEnabled) private var animations
+    private var reduceMotion: Bool { systemReduceMotion || !animations }
     let onDone: () -> Void
 
     init(model: AppModel, onDone: @escaping () -> Void = {}) {
@@ -26,11 +28,11 @@ struct SetupFlowView: View {
                 complete
                     .transition(.opacity.combined(with: .offset(y: 8)))
             } else {
-                progress
+                if setup.step != .face { progress }
                 Group {
                     switch setup.step {
                     case .permissions: permissions
-                    case .face: EnrollmentView(model: enrollment, onContinue: setup.continueFace, compact: true)
+                    case .face: FaceRegistrationView(model: enrollment, preferences: preferences, onContinue: setup.continueFace, onClose: onDone)
                     case .password: passwordEntry
                     case .finish: finish
                     }
@@ -43,7 +45,7 @@ struct SetupFlowView: View {
                         .accessibilityIdentifier("setupFeedback")
                 }
                 if setup.isBusy { ProgressView().controlSize(.small) }
-                if setup.step != .permissions && !setup.isBusy && !enrollment.isBusy && !enrollment.canSave {
+                if setup.step != .permissions && setup.step != .face && !setup.isBusy && !enrollment.isBusy && !enrollment.canSave {
                     Button("Back", action: setup.back).buttonStyle(.plain)
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }

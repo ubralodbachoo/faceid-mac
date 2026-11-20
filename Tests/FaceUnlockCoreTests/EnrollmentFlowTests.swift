@@ -293,8 +293,15 @@ final class EnrollmentFlowTests: XCTestCase {
         XCTAssertNil(fixture.model.previewImage)
         XCTAssertTrue(fixture.model.canSave)
         XCTAssertNil(fixture.blobs.data)
+        fixture.model.faceName = "  "
+        fixture.model.save()
+        XCTAssertEqual(fixture.model.phase, .review)
+        XCTAssertTrue(fixture.model.canSave, "An invalid name must not discard a completed scan")
+        XCTAssertNil(fixture.blobs.data)
+        fixture.model.faceName = "Owner"
         fixture.model.save()
         XCTAssertEqual(fixture.model.phase, .saved)
+        XCTAssertEqual(fixture.model.registeredFaces.map(\.name), ["Owner"])
         XCTAssertTrue(fixture.model.hasEnrollment)
         XCTAssertFalse(fixture.model.canSave)
         XCTAssertTrue(fixture.blobs.data?.starts(with: Data("FUE1".utf8)) == true)
@@ -393,4 +400,16 @@ final class EnrollmentFlowTests: XCTestCase {
         XCTAssertNil(fixture.model.previewImage)
         XCTAssertNil(fixture.blobs.data)
     }
+    @MainActor
+    func testOpeningRegistrationSurfaceDoesNotAuthorizeOrStartCamera() {
+        let fixture = FlowFixture()
+        fixture.model.prepareCapture()
+        XCTAssertEqual(fixture.auth.calls, 0)
+        XCTAssertFalse(fixture.camera.started)
+        XCTAssertFalse(fixture.model.isBusy)
+        XCTAssertFalse(fixture.model.canSave)
+        XCTAssertEqual(fixture.model.phase, .idle)
+        XCTAssertEqual(fixture.model.faceName, "My face")
+    }
+
 }

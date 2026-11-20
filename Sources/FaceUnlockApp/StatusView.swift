@@ -9,7 +9,8 @@ struct StatusView: View {
     @ObservedObject private var lockScreen: LockScreenFlowModel
     @ObservedObject private var enrollment: EnrollmentModel
     @ObservedObject private var passwordSettings: PasswordSettingsModel
-    @State private var page = SettingsPage.overview
+    @State private var page = SettingsPage.general
+    @State private var appeared = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var onSetup: () -> Void
 
@@ -20,130 +21,114 @@ struct StatusView: View {
         passwordSettings = model.passwordSettings
     }
 
+    private var motionReduced: Bool { reduceMotion || !preferences.animations }
+
     private var workActive: Bool {
         setup.isBusy || enrollment.isBusy || enrollment.canSave || lockScreen.isBusy || passwordSettings.isBusy ||
         model.faceTest.isBusy || model.manualTest.isArmed || model.vault.isBusy || model.recognition.isBusy
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "faceid").font(.system(size: 20, weight: .light))
-                Text("Face Unlock").font(.system(size: 14, weight: .semibold))
-                Spacer()
-                #if !FACEUNLOCK_CUSTOMER
-                Text("ADMIN").font(.system(size: 9, weight: .semibold)).tracking(1.5).foregroundStyle(.tertiary)
-                AdminToolsButton(model: model)
-                #endif
-            }.padding(.horizontal, 32).padding(.vertical, 21)
-            Divider().opacity(0.45)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 28) {
-                    if page != .overview {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(page.title).font(.system(size: 29, weight: .semibold))
-                            Text(subtitle).font(.system(size: 13)).foregroundStyle(.secondary)
-                        }.padding(.top, 8)
+        ZStack {
+            Color.black
+            if preferences.lightRays { LightRaysBackground().allowsHitTesting(false).accessibilityHidden(true) }
+            LinearGradient(colors: [.black.opacity(0.28), .black.opacity(0.75)],
+                           startPoint: .top, endPoint: .bottom).allowsHitTesting(false)
+            VStack(spacing: 0) {
+                ZStack(alignment: .top) {
+                    ScrollView {
+                        pageContent
+                            .padding(.horizontal, 18).padding(.top, 14).padding(.bottom, 12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    pageContent
-                }.padding(.horizontal, 40).padding(.vertical, 26)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .id(page)
+                    .transition(motionReduced ? .opacity : .opacity.combined(with: .offset(y: 8)))
+                }
+                .animation(motionReduced ? nil : .easeInOut(duration: 0.28), value: page)
+                SettingsDock(selection: $page).padding(.top, 8).padding(.bottom, 14)
             }
-            .id(page)
-            .transition(.opacity)
-            SettingsDock(selection: $page).padding(.top, 12).padding(.bottom, 23)
+            .opacity(appeared ? 1 : 0)
+            .offset(y: appeared || motionReduced ? 0 : 10)
         }
-        .frame(width: 760, height: 740)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: page)
+        .frame(width: 520, height: 520)
+        .clipped()
+        .preferredColorScheme(.dark)
+        .environment(\.appAnimationsEnabled, preferences.animations)
+        .tint(preferences.accent == .white ? .blue : preferences.accent.color)
+        .onAppear { withAnimation(motionReduced ? nil : .easeOut(duration: 0.35)) { appeared = true } }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.refresh() }
     }
 
     @ViewBuilder private var pageContent: some View {
         switch page {
-        case .overview: overview
-        case .permissions:
-            PermissionSettingsView(model: model)
-            Label("Camera images stay on this Mac. No microphone is used.", systemImage: "lock.shield")
-                .font(.caption).foregroundStyle(.secondary)
+        case .general: general
         case .faces:
-            EnrollmentView(model: enrollment, compact: true, settingsMode: true, beforeCapture: {
-                model.lockScreen.disableAutomaticScanning()
-            })
-            .disabled(passwordSettings.isBusy || setup.isBusy || lockScreen.isBusy)
-            .onDisappear { if enrollment.isBusy || enrollment.canSave { enrollment.cancel() } }
-        case .password: PasswordSettingsView(model: passwordSettings, vault: model.vault,
-                                             otherWorkActive: enrollment.isBusy || enrollment.canSave || setup.isBusy || lockScreen.isBusy)
-        case .appearance: AppearanceSettingsView(preferences: preferences, indicator: model.lockIndicator, previewDisabled: workActive)
+            FacesSettingsView(model: enrollment, preferences: preferences, otherWorkActive: passwordSettings.isBusy || setup.isBusy || lockScreen.isBusy,
+                              beforeCapture: { model.lockScreen.disableAutomaticScanning() })
+                .onDisappear { if enrollment.isBusy || enrollment.canSave { enrollment.cancel() } }
+        case .password:
+            PasswordSettingsView(model: passwordSettings, vault: model.vault,
+                                 otherWorkActive: enrollment.isBusy || enrollment.canSave || setup.isBusy || lockScreen.isBusy)
         }
     }
 
-    private var subtitle: String {
-        switch page {
-        case .overview: ""
-        case .permissions: "Manage the access Face Unlock needs."
-        case .faces: "Register your face or add another appearance."
-        case .password: "Keep your saved Mac login password up to date."
-        case .appearance: "Make the notch feel like yours."
-        }
-    }
-
-    private var overview: some View {
-        VStack(spacing: 22) {
-            FaceIDAnimationFrame(stage: .scanning, motionTime: 1, stageTime: 0,
-                                 reduceMotion: true, accent: preferences.accent.color)
-                .frame(width: 112, height: 112)
-                .background(.black, in: RoundedRectangle(cornerRadius: 30))
-                .padding(.top, 12)
-            VStack(spacing: 8) {
-                Text(lockScreen.automaticUnlockEnabled ? "A glance. You’re in." : "Your Mac, at a glance.")
-                    .font(.system(size: 30, weight: .semibold))
-                Text(lockScreen.automaticUnlockEnabled ? "Face Unlock is on. Lock your Mac and look at the camera." : "Face Unlock is off for this session.")
-                    .font(.callout).foregroundStyle(.secondary)
-            }
-            if preferences.setupCompleted {
-                Button(lockScreen.automaticUnlockEnabled ? "Turn off Face Unlock" : "Enable Face Unlock") {
-                    if lockScreen.automaticUnlockEnabled { setup.turnOff() }
-                    else { setup.enableSavedSetup() }
-                }.buttonStyle(.borderedProminent).controlSize(.large).disabled(workActive)
-            } else {
-                Button("Continue setup in the notch", action: onSetup)
-                    .buttonStyle(.borderedProminent).controlSize(.large).disabled(workActive)
+    private var general: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            SettingsCard {
+                SettingsRow("Enable Face Unlock") {
+                    Toggle("Enable Face Unlock", isOn: Binding(get: { lockScreen.automaticUnlockEnabled }, set: { enabled in
+                        if enabled { setup.enableSavedSetup() } else { setup.turnOff() }
+                    }))
+                    .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                    .disabled(workActive || !preferences.setupCompleted)
+                }
+                if !preferences.setupCompleted {
+                    SettingsDivider()
+                    SettingsRow("Setup") {
+                        Button("Open notch", action: onSetup).disabled(workActive)
+                    }
+                }
             }
             if setup.isBusy { ProgressView().controlSize(.small) }
-            if !setup.status.isEmpty {
-                Text(setup.status).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            if !setup.status.isEmpty && setup.status != "Face unlock is off." {
+                Text(setup.status).font(.caption).foregroundStyle(.secondary)
+                    .textSelection(.enabled).padding(.horizontal, 4)
             }
             if let failure = lockScreen.failure, failure != .canceled, failure != .scanOnly {
-                Text(lockScreen.status).font(.callout).foregroundStyle(.orange).multilineTextAlignment(.center)
+                Text(lockScreen.status).font(.caption).foregroundStyle(.orange)
+                    .textSelection(.enabled).padding(.horizontal, 4)
             }
-            HStack(spacing: 12) {
-                summary("Permissions", detail: permissionsReady ? "Allowed" : "Needs attention", symbol: "hand.raised", page: .permissions)
-                summary("Faces", detail: enrollment.hasEnrollment ? "Registered" : "Not registered", symbol: "faceid", page: .faces)
-                summary("Password", detail: model.vault.hasCredential ? "Saved securely" : "Not saved", symbol: "key.horizontal", page: .password)
-            }.padding(.top, 8)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Permissions").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).padding(.leading, 12)
+                PermissionSettingsView(model: model, compact: true)
+            }
+            ColorSettingsView(preferences: preferences, indicator: model.lockIndicator, previewDisabled: workActive)
+            SettingsCard {
+                preferenceToggle("Light rays", isOn: $preferences.lightRays)
+                SettingsDivider()
+                preferenceToggle("Animations", isOn: $preferences.animations)
+                SettingsDivider()
+                preferenceToggle("Haptic feedback", isOn: $preferences.hapticFeedback)
+            }
             #if !FACEUNLOCK_CUSTOMER
-            Button("Replay setup in notch", action: onSetup).buttonStyle(.link).disabled(workActive)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Admin").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).padding(.leading, 12)
+                SettingsCard {
+                    SettingsRow("Replay setup") { Button("Open notch", action: onSetup).disabled(workActive) }
+                    SettingsDivider()
+                    SettingsRow("Developer tools") { AdminToolsButton(model: model) }
+                }
+            }
             #endif
-            Text("Keep Face Unlock running in the menu bar. After reopening the app, enable it again and confirm with macOS.")
-                .font(.caption).foregroundStyle(.tertiary).multilineTextAlignment(.center).frame(maxWidth: 440)
-        }.frame(maxWidth: .infinity)
+        }
+        .font(.system(size: 13))
+    }
+    private func preferenceToggle(_ title: String, isOn: Binding<Bool>) -> some View {
+        SettingsRow(title) {
+            Toggle(title, isOn: isOn).labelsHidden().toggleStyle(.switch).controlSize(.small)
+        }
     }
 
-    private var permissionsReady: Bool {
-        model.report.status(for: .cameraPermission) == .available && model.report.status(for: .accessibilityPermission) == .available
-    }
-
-    private func summary(_ title: String, detail: String, symbol: String, page: SettingsPage) -> some View {
-        Button { self.page = page } label: {
-            VStack(spacing: 9) {
-                Image(systemName: symbol).font(.system(size: 20, weight: .light))
-                Text(title).font(.system(size: 12, weight: .medium))
-                Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
-            }.frame(maxWidth: .infinity).padding(.vertical, 20)
-                .background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 18))
-        }.buttonStyle(.plain)
-    }
 }
 
 #if !FACEUNLOCK_CUSTOMER

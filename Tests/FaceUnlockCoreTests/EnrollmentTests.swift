@@ -377,7 +377,7 @@ final class EnrollmentTests: XCTestCase {
         let reopened = EnrollmentVault(keys: keys, blobs: blobs, authenticator: auth, modelIdentifier: enrollmentModelID)
         try await reopened.authorizeReading()
         let saved = try reopened.templateForVerification()
-        XCTAssertEqual(saved.format, .multipleFaces)
+        XCTAssertEqual(saved.format, .managedFaces)
         XCTAssertEqual(saved.faces.count, 2)
         XCTAssertEqual(saved.embeddings.first?.values, first.embeddings.first?.values)
         XCTAssertEqual(saved.additionalFaces.first?.first?.values, second.embeddings.first?.values)
@@ -413,6 +413,100 @@ final class EnrollmentTests: XCTestCase {
         try await vault.beginEnrollment(); try vault.save(template(4))
         try await vault.authorizeReading()
         XCTAssertEqual(try vault.templateForVerification().faces.count, 1, "Register again replaces all faces")
+    }
+
+    @MainActor
+    func testNamedFacesPersistEncryptedAndMetadataChangesRequireFreshAuthorization() async throws {
+        let keys = EnrollmentKeys(), blobs = EnrollmentBlobs(), auth = EnrollmentAuth()
+        let vault = EnrollmentVault(keys: keys, blobs: blobs, authenticator: auth, modelIdentifier: enrollmentModelID)
+        try await vault.beginEnrollment(); try vault.save(template(), named: "Owner")
+        try await vault.beginEnrollment(addingFace: true); try vault.save(template(50), named: "Glasses")
+        let reopened = EnrollmentVault(keys: keys, blobs: blobs, authenticator: auth, modelIdentifier: enrollmentModelID)
+        try await reopened.authorizeReading()
+        XCTAssertEqual(try reopened.templateForVerification().faceNames, ["Owner", "Glasses"])
+        let revision = try XCTUnwrap(reopened.metadataRevision)
+        let calls = auth.calls
+        reopened.lock()
+        try await reopened.updateFace(at: 1, enabled: false, expectedRevision: revision)
+        XCTAssertEqual(auth.calls, calls + 1)
+        XCTAssertFalse(reopened.sessionIsValid)
+        XCTAssertEqual(reopened.registeredEnabled, [true, false])
+        let renamedRevision = try XCTUnwrap(reopened.metadataRevision)
+        try await reopened.updateFace(at: 1, name: "Sunglasses", expectedRevision: renamedRevision)
+        try await reopened.authorizeReading()
+        let saved = try reopened.templateForVerification()
+        XCTAssertEqual(saved.format, .managedFaces)
+        XCTAssertEqual(saved.faceNames, ["Owner", "Sunglasses"])
+        XCTAssertEqual(saved.faceEnabled, [true, false])
+        XCTAssertNil(blobs.value?.range(of: Data("Sunglasses".utf8)))
+    }
+
+    @MainActor
+    func testStaleCanceledAndFailedNameEditsPreserveCollection() async throws {
+        let keys = EnrollmentKeys(), blobs = EnrollmentBlobs(), auth = EnrollmentAuth()
+        let vault = EnrollmentVault(keys: keys, blobs: blobs, authenticator: auth, modelIdentifier: enrollmentModelID)
+        try await vault.beginEnrollment(); try vault.save(template(), named: "Original")
+        let revision = try XCTUnwrap(vault.metadataRevision)
+        try await vault.updateFace(at: 0, name: "Updated", expectedRevision: revision)
+        let updated = blobs.value
+        do { try await vault.updateFace(at: 0, enabled: false, expectedRevision: revision); XCTFail("Stale edit must fail") } catch {}
+        XCTAssertEqual(blobs.value, updated)
+        let current = try XCTUnwrap(vault.metadataRevision)
+        auth.fail = true
+        do { try await vault.updateFace(at: 0, name: "Canceled", expectedRevision: current); XCTFail("Canceled auth") } catch {}
+        XCTAssertEqual(blobs.value, updated)
+        auth.fail = false; blobs.failWrite = true
+        do { try await vault.updateFace(at: 0, name: "Failed", expectedRevision: current); XCTFail("Failed write") } catch {}
+        XCTAssertEqual(blobs.value, updated)
+        XCTAssertFalse(vault.sessionIsValid)
+    }
+
+    @MainActor
+    func testRecapturePreservesOtherFacesAndDisabledStateThenRemovalKeepsRemainingNames() async throws {
+        let keys = EnrollmentKeys(), blobs = EnrollmentBlobs(), auth = EnrollmentAuth()
+        let vault = EnrollmentVault(keys: keys, blobs: blobs, authenticator: auth, modelIdentifier: enrollmentModelID)
+        let first = try template(), replacement = try template(100)
+        try await vault.beginEnrollment(); try vault.save(first, named: "First")
+        try await vault.beginEnrollment(addingFace: true); try vault.save(template(50), named: "Second")
+        try await vault.updateFace(at: 1, enabled: false, expectedRevision: XCTUnwrap(vault.metadataRevision))
+        let revision = try XCTUnwrap(vault.metadataRevision)
+        try await vault.beginEnrollment(replacingFace: 1, expectedRevision: revision)
+        try vault.save(replacement, named: "Recaptured")
+        try await vault.authorizeReading()
+        let saved = try vault.templateForVerification()
+        XCTAssertEqual(saved.faceNames, ["First", "Recaptured"])
+        XCTAssertEqual(saved.faceEnabled, [true, false])
+        XCTAssertEqual(saved.embeddings[0].values, first.embeddings[0].values)
+        XCTAssertEqual(saved.additionalFaces[0][0].values, replacement.embeddings[0].values)
+        try await vault.updateFace(at: 0, remove: true, expectedRevision: XCTUnwrap(vault.metadataRevision))
+        XCTAssertEqual(vault.registeredNames, ["Recaptured"])
+        XCTAssertEqual(vault.registeredEnabled, [false])
+        try await vault.updateFace(at: 0, remove: true, expectedRevision: XCTUnwrap(vault.metadataRevision))
+        XCTAssertNil(blobs.value); XCTAssertNil(keys.value); XCTAssertFalse(vault.hasEnrollment)
+    }
+
+    @MainActor
+    func testLegacyNamesAreDefaultsAndMalformedManagedMetadataIsRejected() async throws {
+        let keys = EnrollmentKeys(), blobs = EnrollmentBlobs(), auth = EnrollmentAuth()
+        let key = SymmetricKey(size: .bits256)
+        keys.value = key.withUnsafeBytes { Data($0) }
+        let vectors = try template().embeddings.map(\.values)
+        var payload: [String: Any] = ["schema": 3, "userID": 501, "modelIdentifier": enrollmentModelID,
+            "vectors": vectors, "additionalVectors": [vectors],
+            "pipelineIdentifier": VideoEnrollmentCollector.pipelineIdentifier,
+            "policyIdentifier": VideoEnrollmentCollector.policyIdentifier]
+        func seal() throws {
+            let data = try JSONSerialization.data(withJSONObject: payload)
+            let encrypted = try AES.GCM.seal(data, using: key, authenticating: Data("org.faceunlock.development:enrollment-v1:uid=501".utf8))
+            blobs.value = Data("FUE1".utf8) + encrypted.combined!
+        }
+        let vault = EnrollmentVault(keys: keys, blobs: blobs, authenticator: auth, modelIdentifier: enrollmentModelID, userID: 501)
+        try seal(); try await vault.authorizeReading()
+        XCTAssertEqual(try vault.templateForVerification().faceNames, ["My face", "Face 2"])
+        payload["schema"] = 4
+        try seal()
+        do { try await vault.authorizeReading(); XCTFail("Managed schema requires metadata") } catch {}
+        XCTAssertFalse(vault.sessionIsValid)
     }
 
 }

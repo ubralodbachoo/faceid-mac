@@ -12,18 +12,21 @@ struct EnrollmentView: View {
     @State private var confirmingRemoval = false
 
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: settingsMode ? 10 : 14) {
             VStack(spacing: 7) {
-                Text(title).font(.system(size: 26, weight: .semibold))
-                Text(subtitle)
-                    .font(.callout).foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 470, minHeight: 34)
+                Text(title).font(.system(size: settingsMode ? 20 : 26, weight: .semibold))
+                if !settingsMode {
+                    Text(subtitle)
+                        .font(.callout).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 470, minHeight: 34)
+                }
             }
 
             CameraGuideView(model: model)
-                .scaleEffect(compact ? 0.75 : 1)
-                .frame(width: compact ? 240 : 320, height: compact ? 240 : 320)
+                .scaleEffect(settingsMode ? 0.5625 : compact ? 0.75 : 1)
+                .frame(width: settingsMode ? 180 : compact ? 240 : 320,
+                       height: settingsMode ? 180 : compact ? 240 : 320)
 
             if model.phase == .capturing || model.phase == .paused || model.phase == .review {
                 Text("\(model.completedPoses) of 9 angles ready")
@@ -41,30 +44,33 @@ struct EnrollmentView: View {
             }
 
             Text(model.status)
-                .font(.callout)
+                .font(settingsMode ? .caption : .callout)
                 .foregroundStyle(model.phase == .failed ? Color.orange : Color.secondary)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 490, minHeight: 38)
+                .frame(maxWidth: 490, minHeight: settingsMode ? 24 : 38)
                 .textSelection(.enabled)
                 .accessibilityIdentifier("enrollmentFeedback")
 
             actions
-                .controlSize(.large)
-                .frame(minHeight: 38)
+                .controlSize(settingsMode ? .regular : .large)
+                .frame(minHeight: settingsMode ? 28 : 38)
 
-            VStack(spacing: 5) {
-                Label("Processed on this Mac. Camera images are never saved.", systemImage: "lock.shield")
-                Text(model.phase == .capturing || model.phase == .paused || model.phase == .review
-                     ? "Switching apps pauses the camera. \(remainingTime) remaining to finish."
-                    : onContinue != nil ? "Save your face, then continue to your Mac password."
-                    : settingsMode ? "Up to 3 faces. Add face keeps existing faces; Register again replaces them."
-                    : "Try Face test to compare your face, or finish setup to enable face unlock.")
+            if settingsMode {
+                Text("Camera images are never saved.").font(.system(size: 11)).foregroundStyle(.secondary)
+            } else {
+                VStack(spacing: 5) {
+                    Label("Processed on this Mac. Camera images are never saved.", systemImage: "lock.shield")
+                    Text(model.phase == .capturing || model.phase == .paused || model.phase == .review
+                         ? "Switching apps pauses the camera. \(remainingTime) remaining to finish."
+                        : onContinue != nil ? "Save your face, then continue to your Mac password."
+                        : "Try Face test to compare your face, or finish setup to enable face unlock.")
+                }
+                .font(.caption).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
             }
-            .font(.caption).foregroundStyle(.secondary)
-            .multilineTextAlignment(.center)
         }
-        .padding(.horizontal, 28)
-        .padding(.vertical, 18)
+        .padding(.horizontal, settingsMode ? 8 : 28)
+        .padding(.vertical, settingsMode ? 6 : 18)
         .frame(maxWidth: .infinity)
         .confirmationDialog("Replace your saved faces?", isPresented: $confirmingReplacement, titleVisibility: .visible) {
             Button("Register again", role: .destructive) { beforeCapture(); model.start() }
@@ -187,9 +193,11 @@ struct EnrollmentView: View {
     }
 }
 
-private struct CameraGuideView: View {
+struct CameraGuideView: View {
     @ObservedObject var model: EnrollmentModel
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.appAnimationsEnabled) private var animations
+    private var reduceMotion: Bool { systemReduceMotion || !animations }
 
     var body: some View {
         ZStack {
@@ -216,17 +224,7 @@ private struct CameraGuideView: View {
                     .offset(y: -148)
                     .rotationEffect(.degrees(Double(tick) * 360 / 64))
             }
-            if model.phase == .capturing {
-                VStack {
-                    Spacer()
-                    Text(model.detectedFaceBounds == nil ? "Finding your face" : "Face tracked")
-                        .font(.caption.weight(.medium))
-                        .padding(.horizontal, 11).padding(.vertical, 6)
-                        .background(.black.opacity(0.65), in: Capsule())
-                        .foregroundStyle(.white)
-                        .padding(.bottom, 45)
-                }
-            }
+
         }
         .frame(width: 320, height: 320)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: model.holdProgress)
@@ -237,20 +235,20 @@ private struct CameraGuideView: View {
 
     private func tickColor(_ tick: Int) -> Color {
         if model.phase == .saved || model.phase == .review { return .mint }
-        guard model.phase == .capturing || model.phase == .paused else { return .secondary.opacity(0.3) }
+        guard model.phase == .capturing || model.phase == .paused else { return .white.opacity(0.75) }
         if model.currentPose == .center && model.completedPoses == 0 {
             return .accentColor.opacity(0.2 + model.holdProgress * 0.35)
         }
         let angle = Double(tick) * 360 / 64
         let directions = EnrollmentPose.allCases.filter { $0 != .center }
-        guard let pose = directions.min(by: { distance(angle, $0.compassAngle!) < distance(angle, $1.compassAngle!) }) else { return .secondary.opacity(0.3) }
+        guard let pose = directions.min(by: { distance(angle, $0.compassAngle!) < distance(angle, $1.compassAngle!) }) else { return .white.opacity(0.75) }
         if pose.rawValue < model.completedPoses { return .accentColor }
         if pose == model.currentPose {
             let start = pose.compassAngle! - 22.5
             let sectorProgress = (angle - start + 360).truncatingRemainder(dividingBy: 360) / 45
             return sectorProgress < model.holdProgress ? .accentColor : .accentColor.opacity(0.3)
         }
-        return .secondary.opacity(0.3)
+        return .white.opacity(0.75)
     }
 
     private func distance(_ first: Double, _ second: Double) -> Double {

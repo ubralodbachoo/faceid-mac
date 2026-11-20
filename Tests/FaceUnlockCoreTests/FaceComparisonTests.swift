@@ -224,4 +224,27 @@ final class FaceComparisonTests: XCTestCase {
         XCTAssertThrowsError(try first.adding(first).adding(first).adding(first))
     }
 
+    func testDisabledFaceCannotMatchAndAllDisabledFailsBeforeScanning() throws {
+        let owner = try template()
+        let other = try template(Array(repeating: embedding(0), count: 18))
+        let both = try owner.adding(other)
+        let onlyOther = try both.editingFace(at: 0, enabled: false)
+        let window = try FaceComparisonWindow(template: onlyOther)
+        XCTAssertEqual(try window.similarity(for: embedding()), 0, accuracy: 1e-6)
+        XCTAssertEqual(try window.similarity(for: embedding(0)), 1, accuracy: 1e-6)
+        XCTAssertThrowsError(try FaceComparisonWindow(template: onlyOther.editingFace(at: 1, enabled: false)))
+        XCTAssertTrue(both.hasEnabledFaces)
+    }
+
+    func testFaceNameValidationAndManagedMetadataLengths() throws {
+        let first = try template()
+        for name in ["", "  ", String(repeating: "x", count: 41), "Name\nInjected"] {
+            XCTAssertThrowsError(try first.editingFace(at: 0, name: name))
+        }
+        XCTAssertEqual(try first.editingFace(at: 0, name: "  Owner  ").faceNames, ["Owner"])
+        XCTAssertThrowsError(try EnrollmentTemplate(embeddings: first.embeddings, modelIdentifier: "test", format: .managedFaces,
+            faceNames: ["One", "Two"], faceEnabled: [true]))
+        XCTAssertThrowsError(try EnrollmentTemplate(embeddings: first.embeddings, modelIdentifier: "test", faceEnabled: [false]))
+    }
+
 }

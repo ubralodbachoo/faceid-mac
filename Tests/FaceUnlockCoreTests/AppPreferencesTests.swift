@@ -39,4 +39,16 @@ final class AppPreferencesTests: XCTestCase {
             XCTAssertEqual(frame.midX, screen.midX)
         }
     }
+    @MainActor
+    func testEffectsTogglesPersistExplicitFalseAndDefaultToOn() throws {
+        let suite = "FaceUnlock.PreferencesTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = AppPreferences(defaults: defaults)
+        XCTAssertTrue(preferences.lightRays); XCTAssertTrue(preferences.animations); XCTAssertTrue(preferences.hapticFeedback)
+        preferences.lightRays = false; preferences.animations = false; preferences.hapticFeedback = false
+        let reopened = AppPreferences(defaults: defaults)
+        XCTAssertFalse(reopened.lightRays); XCTAssertFalse(reopened.animations); XCTAssertFalse(reopened.hapticFeedback)
+    }
+
 }

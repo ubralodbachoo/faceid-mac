@@ -14,6 +14,12 @@ enum EnrollmentPhase: Equatable {
     }
 }
 
+struct RegisteredFace: Identifiable, Equatable {
+    let id: Int
+    let name: String
+    let isEnabled: Bool
+}
+
 @MainActor
 final class EnrollmentModel: ObservableObject {
     @Published private(set) var phase: EnrollmentPhase = .idle
@@ -30,7 +36,11 @@ final class EnrollmentModel: ObservableObject {
     @Published private(set) var faceIsReady = false
     @Published private(set) var detectedFaceBounds: FaceBounds?
     @Published private(set) var secondsRemaining = 0
+    @Published var faceName = "My face"
+    @Published private(set) var registeredFaces: [RegisteredFace] = []
+    private var registeredRevision: Data?
     @Published private(set) var isAddingFace = false
+    private(set) var replacingFaceIndex: Int?
     @Published private(set) var savedFaceCount: Int?
     @Published private(set) var cameraSettingsNeeded = false
     private let vault: EnrollmentVault
@@ -70,6 +80,7 @@ final class EnrollmentModel: ObservableObject {
         vault.refreshPresence()
         hasEnrollment = vault.hasEnrollment
         savedFaceCount = hasEnrollment ? vault.faceCount : 0
+        if !hasEnrollment { registeredFaces = []; registeredRevision = nil }
         if phase == .saved && !hasEnrollment { phase = .idle }
     }
 
@@ -81,12 +92,36 @@ final class EnrollmentModel: ObservableObject {
         try await session.waitForForeground()
     }
 
+    /// Opening the registration surface alone never authorizes or starts the camera.
+    func prepareCapture(addingFace: Bool = false, replacingFace: Int? = nil) {
+        guard !isBusy, !canSave else { return }
+        resetPending()
+        isAddingFace = addingFace; replacingFaceIndex = replacingFace
+        faceName = replacingFace.flatMap { id in registeredFaces.first(where: { $0.id == id })?.name }
+            ?? (addingFace ? "Face \(max(2, (savedFaceCount ?? 1) + 1))" : "My face")
+        phase = .idle; status = ""
+    }
+
     func start() { start(addingFace: false) }
     func startAddingFace() { start(addingFace: true) }
 
-    private func start(addingFace: Bool) {
+    func retryCapture() {
+        if let replacingFaceIndex { startReplacingFace(at: replacingFaceIndex) }
+        else if isAddingFace { startAddingFace() }
+        else { start() }
+    }
+
+    func startReplacingFace(at index: Int) {
+        guard registeredFaces.contains(where: { $0.id == index }), registeredRevision != nil else { return }
+        start(addingFace: false, replacingFace: index)
+    }
+
+    private func start(addingFace: Bool, replacingFace: Int? = nil) {
         guard !isBusy, !canSave else { return }
-        isAddingFace = addingFace
+        let expectedRevision = replacingFace != nil ? registeredRevision : nil
+        faceName = replacingFace.flatMap { id in registeredFaces.first(where: { $0.id == id })?.name }
+            ?? (addingFace ? "Face \(max(2, (savedFaceCount ?? 1) + 1))" : "My face")
+        isAddingFace = addingFace; replacingFaceIndex = replacingFace
         resetPending()
         vault.lock()
         cancellationMessage = nil
@@ -97,7 +132,7 @@ final class EnrollmentModel: ObservableObject {
         operation = Task {
             do {
                 try await waitForForeground()
-                try await vault.beginEnrollment(addingFace: addingFace)
+                try await vault.beginEnrollment(addingFace: addingFace, replacingFace: replacingFace, expectedRevision: expectedRevision)
                 try Task.checkCancellation()
                 try await waitForForeground()
                 secondsRemaining = vault.secondsRemaining
@@ -285,9 +320,12 @@ final class EnrollmentModel: ObservableObject {
 
     func save() {
         guard !isBusy, let pendingTemplate else { return }
+        do { _ = try EnrollmentTemplate.validateName(faceName) }
+        catch { status = error.localizedDescription; return }
         do {
             try checkSession()
-            try vault.save(pendingTemplate)
+            try vault.save(pendingTemplate, named: faceName)
+            copyRegisteredFaces()
             phase = .saved
             status = isAddingFace ? "Face added. Your existing faces are still saved." : "Your face is saved on this Mac."
         } catch EnrollmentSessionError.foregroundRequired {
@@ -308,8 +346,37 @@ final class EnrollmentModel: ObservableObject {
             try await self.vault.authorizeReading()
             try await self.waitForForeground()
             _ = try self.vault.templateForVerification()
+            self.copyRegisteredFaces()
             self.phase = .saved
-            self.status = "Your saved face data is valid for this account and model."
+            self.status = ""
+        }
+    }
+
+    private func copyRegisteredFaces() {
+        registeredFaces = vault.registeredNames.enumerated().map { index, name in
+            RegisteredFace(id: index, name: name, isEnabled: vault.registeredEnabled[index])
+        }
+        registeredRevision = vault.metadataRevision
+        savedFaceCount = vault.faceCount
+    }
+
+    func renameFace(at index: Int, to name: String) { editFace(at: index, name: name) }
+    func setFaceEnabled(at index: Int, enabled: Bool) { editFace(at: index, enabled: enabled) }
+    func removeFace(at index: Int) { editFace(at: index, remove: true) }
+
+    private func editFace(at index: Int, name: String? = nil, enabled: Bool? = nil, remove: Bool = false) {
+        guard let revision = registeredRevision else { return }
+        runAuthenticated(phase: remove ? .deleting : .validating) {
+            do {
+                try await self.vault.updateFace(at: index, name: name, enabled: enabled, remove: remove, expectedRevision: revision)
+            } catch {
+                if let enrollmentError = error as? EnrollmentError, case .expired = enrollmentError {
+                    self.registeredFaces = []; self.registeredRevision = nil
+                }
+                throw error
+            }
+            self.copyRegisteredFaces()
+            self.phase = .saved; self.status = ""
         }
     }
 
@@ -322,7 +389,7 @@ final class EnrollmentModel: ObservableObject {
     }
 
     private func runAuthenticated(phase: EnrollmentPhase, _ action: @escaping @MainActor () async throws -> Void) {
-        guard !isBusy else { return }
+        guard !isBusy, !canSave else { return }
         resetPending()
         watchdog?.cancel(); watchdog = nil
         vault.lock()
@@ -359,6 +426,8 @@ final class EnrollmentModel: ObservableObject {
     func cancel() { stop(reason: "Setup canceled. Any saved face is unchanged.", phase: .idle) }
 
     private func sessionChanged() {
+        registeredFaces = []; registeredRevision = nil
+        vault.clearVisibleMetadata()
         guard isBusy || canSave else { vault.lock(); return }
         stop(reason: "Setup stopped because your Mac locked, slept, or changed account. Start again when you return.", phase: .failed)
     }

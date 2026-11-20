@@ -247,7 +247,8 @@ private struct LockScreenIndicatorView: View {
     @ObservedObject var preferences: AppPreferences
     private let surfaceBlack = Color(.sRGB, red: 0, green: 0, blue: 0, opacity: 1)
     @State private var expanded = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    private var reduceMotion: Bool { systemReduceMotion || !preferences.animations }
 
     private var phase: LockScreenPhase { presentation.phase }
     private var retryableFailure: Bool {

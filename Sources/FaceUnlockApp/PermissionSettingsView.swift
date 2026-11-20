@@ -5,6 +5,7 @@ import FaceUnlockCore
 
 struct PermissionSettingsView: View {
     @ObservedObject var model: AppModel
+    var compact = false
     @State private var requestingCamera = false
 
     var body: some View {
@@ -19,7 +20,7 @@ struct PermissionSettingsView: View {
                     requestingCamera = false; model.refresh()
                 }
             }
-            Divider().padding(.leading, 58)
+            Divider().padding(.leading, compact ? 0 : 58)
             permission("Accessibility", detail: "Enter your saved password after a match.", symbol: "accessibility",
                        allowed: accessibilityAllowed) {
                 if !accessibilityAllowed { model.manualTest.requestAccessibility() }
@@ -28,7 +29,8 @@ struct PermissionSettingsView: View {
             }
         }
         .padding(.horizontal, 18)
-        .background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 20))
+        .background(.white.opacity(compact ? 0.055 : 0.035), in: RoundedRectangle(cornerRadius: compact ? 18 : 20))
+        .overlay(RoundedRectangle(cornerRadius: compact ? 18 : 20).stroke(.white.opacity(compact ? 0.08 : 0), lineWidth: 1))
         .task {
             while !Task.isCancelled {
                 model.refresh()
@@ -43,19 +45,19 @@ struct PermissionSettingsView: View {
     private func permission(_ title: String, detail: String, symbol: String, allowed: Bool,
                             action: @escaping () -> Void) -> some View {
         HStack(spacing: 14) {
-            Image(systemName: symbol).font(.system(size: 22, weight: .light)).frame(width: 30)
+            if !compact { Image(systemName: symbol).font(.system(size: 22, weight: .light)).frame(width: 30) }
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 7) {
-                    Text(title).font(.system(size: 13, weight: .semibold))
+                    Text(title).font(.system(size: 13, weight: compact ? .regular : .semibold))
                     if allowed { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.caption) }
                 }
-                Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
+                if !compact { Text(detail).font(.system(size: 11)).foregroundStyle(.secondary) }
             }
             Spacer(minLength: 12)
             Button(allowed ? "Settings…" : "Allow…", action: action)
                 .disabled(requestingCamera)
                 .accessibilityLabel("\(allowed ? "Manage" : "Allow") \(title)")
-        }.padding(.vertical, 19)
+        }.padding(.vertical, compact ? 13 : 19)
     }
 
     private func openSettings(_ pane: String) {

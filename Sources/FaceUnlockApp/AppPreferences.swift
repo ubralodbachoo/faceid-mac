@@ -32,12 +32,18 @@ final class AppPreferences: ObservableObject {
     @Published var accent: FaceIDAccent {
         didSet { defaults.set(accent.rawValue, forKey: "faceIDAccent") }
     }
+    @Published var lightRays: Bool { didSet { defaults.set(lightRays, forKey: "lightRays") } }
+    @Published var animations: Bool { didSet { defaults.set(animations, forKey: "animations") } }
+    @Published var hapticFeedback: Bool { didSet { defaults.set(hapticFeedback, forKey: "hapticFeedback") } }
     @Published private(set) var setupCompleted: Bool
     var shouldPresentSetupAtLaunch: Bool { shouldPresentSetupAtLaunch(isAdmin: AppEdition.isAdmin) }
     func shouldPresentSetupAtLaunch(isAdmin: Bool) -> Bool { isAdmin || !setupCompleted }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        lightRays = defaults.object(forKey: "lightRays") as? Bool ?? true
+        animations = defaults.object(forKey: "animations") as? Bool ?? true
+        hapticFeedback = defaults.object(forKey: "hapticFeedback") as? Bool ?? true
         accent = FaceIDAccent(rawValue: defaults.string(forKey: "faceIDAccent") ?? "") ?? .green
         setupCompleted = defaults.bool(forKey: "setupCompleted.v1")
     }
@@ -45,5 +51,13 @@ final class AppPreferences: ObservableObject {
     func recordCompletedSetup() {
         setupCompleted = true
         defaults.set(true, forKey: "setupCompleted.v1")
+    }
+}
+
+private struct AppAnimationsKey: EnvironmentKey { static let defaultValue = true }
+extension EnvironmentValues {
+    var appAnimationsEnabled: Bool {
+        get { self[AppAnimationsKey.self] }
+        set { self[AppAnimationsKey.self] = newValue }
     }
 }

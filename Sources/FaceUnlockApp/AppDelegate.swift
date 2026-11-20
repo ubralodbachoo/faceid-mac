@@ -12,6 +12,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var observations: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // A normal app window belongs in the Dock and Command-Tab, even though
+        // the menu bar scene remains available after the last window closes.
+        NSApp.setActivationPolicy(.regular)
         NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
             .sink { [weak self] _ in self?.positionSetup() }.store(in: &observations)
         DistributedNotificationCenter.default().publisher(for: NSNotification.Name("com.apple.screenIsLocked"))
@@ -43,17 +46,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func showSettings() {
         model.refresh()
         if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 740),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 520),
                                   styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
             window.title = AppEdition.isAdmin ? "Face Unlock — Admin" : "Face Unlock"
             window.isReleasedWhenClosed = false
+            window.appearance = NSAppearance(named: .darkAqua)
+            window.backgroundColor = .black
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.titlebarSeparatorStyle = .none
+            window.animationBehavior = .documentWindow
             window.delegate = self
+            let status = NSTitlebarAccessoryViewController()
+            status.layoutAttribute = .right
+            status.view = NSHostingView(rootView: SettingsWindowStatus(model: model.lockScreen, preferences: model.preferences))
+            status.view.setFrameSize(NSSize(width: 154, height: 28))
+            window.addTitlebarAccessoryViewController(status)
             window.contentView = NSHostingView(rootView: StatusView(model: model, onSetup: { [weak self] in
                 self?.showSetup()
             }))
             window.center()
             settingsWindow = window
         }
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
@@ -68,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
               !model.enrollment.canSave, !model.faceTest.isBusy, !model.manualTest.isArmed,
               !model.vault.isBusy, !model.recognition.isBusy, !model.passwordSettings.isBusy else { return }
         model.lockIndicator.hide()
+        model.enrollment.prepareCapture()
         model.setup.restart(at: step)
         settingsWindow?.orderOut(nil)
         let panel = SetupPanel(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -98,7 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let panel = setupPanel, let screen = preferredScreen else { return }
         let frame = NotchSetupGeometry.frame(screen: screen.frame, step: model.setup.step,
                                               complete: model.setup.isComplete, safeTop: screen.safeAreaInsets.top)
-        if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+        if animated && model.preferences.animations && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.35
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
@@ -142,15 +158,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 }
 
+private struct SettingsWindowStatus: View {
+    @ObservedObject var model: LockScreenFlowModel
+    @ObservedObject var preferences: AppPreferences
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "faceid")
+            Text(model.automaticUnlockEnabled ? "Face Unlock on" : "Face Unlock off")
+        }
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(model.automaticUnlockEnabled ? preferences.accent.color : .white.opacity(0.7))
+            .padding(.horizontal, 10).padding(.vertical, 4)
+            .background(.white.opacity(0.07), in: Capsule())
+            .frame(width: 144, height: 28)
+            .preferredColorScheme(.dark)
+    }
+}
+
 enum NotchSetupGeometry {
     static func frame(screen: CGRect, step: SetupStep = .permissions, complete: Bool = false, safeTop: CGFloat = 0) -> CGRect {
-        let width = min(520, max(1, screen.width - 32))
+        let width = min(step == .face && !complete ? 360 : 520, max(1, screen.width - 32))
         let contentHeight: CGFloat
         if complete { contentHeight = 290 }
         else {
             switch step {
             case .permissions: contentHeight = 455
-            case .face: contentHeight = 690
+            case .face: contentHeight = 515
             case .password: contentHeight = 425
             case .finish: contentHeight = 465
             }
@@ -174,7 +207,8 @@ private struct NotchSetupView: View {
     let safeTop: CGFloat
     let onClose: () -> Void
     @State private var appeared = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    private var reduceMotion: Bool { systemReduceMotion || !preferences.animations }
 
     init(model: AppModel, safeTop: CGFloat, onClose: @escaping () -> Void) {
         self.model = model; self.safeTop = safeTop; self.onClose = onClose
@@ -184,21 +218,24 @@ private struct NotchSetupView: View {
     var body: some View {
         VStack(spacing: 0) {
             Color.clear.frame(height: max(8, safeTop + 4))
-            HStack {
-                Label("Face Unlock", systemImage: "faceid").font(.system(size: 12, weight: .medium))
-                if AppEdition.isAdmin {
-                    Text("ADMIN").font(.system(size: 8, weight: .medium)).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button(setup.isComplete ? "Done" : "Later", action: onClose)
-                    .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
-                    .disabled(setup.isBusy || enrollment.isBusy || enrollment.canSave)
-                    .keyboardShortcut(.cancelAction)
-            }.padding(.horizontal, 26).padding(.vertical, 12)
+            if setup.step != .face || setup.isComplete {
+                HStack {
+                    Label("Face Unlock", systemImage: "faceid").font(.system(size: 12, weight: .medium))
+                    if AppEdition.isAdmin {
+                        Text("ADMIN").font(.system(size: 8, weight: .medium)).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(setup.isComplete ? "Done" : "Later", action: onClose)
+                        .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
+                        .disabled(setup.isBusy || enrollment.isBusy || enrollment.canSave)
+                        .keyboardShortcut(.cancelAction)
+                }.padding(.horizontal, 26).padding(.vertical, 12)
+            }
             ScrollView { SetupFlowView(model: model, onDone: onClose) }
         }
         .background(.black, in: UnevenRoundedRectangle(bottomLeadingRadius: 32, bottomTrailingRadius: 32))
         .preferredColorScheme(.dark)
+        .environment(\.appAnimationsEnabled, preferences.animations)
         .tint(.white)
         .opacity(appeared ? 1 : 0)
         .offset(y: appeared || reduceMotion ? 0 : -12)

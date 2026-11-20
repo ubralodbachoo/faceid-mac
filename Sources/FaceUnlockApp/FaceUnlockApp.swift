@@ -48,11 +48,14 @@ final class AppModel: ObservableObject {
     let passwordSettings: PasswordSettingsModel
     let preferences = AppPreferences()
     let lockIndicator: LockScreenIndicator
+    let haptics: HapticFeedbackController
     private var setupObservation: AnyCancellable?
 
     init(provider: any ReadinessProviding) {
         self.provider = provider
         lockIndicator = LockScreenIndicator(preferences: preferences)
+        let preferences = preferences
+        haptics = HapticFeedbackController(enabled: { preferences.hapticFeedback })
         manualTest = ManualUnlockController(monitor: sessionMonitor, vault: vault)
         let scanner = LockScreenFaceScanner(mode: .shortEvaluation)
         let reports = LockScreenReportStore()
@@ -112,6 +115,7 @@ final class AppModel: ObservableObject {
         setupObservation = setup.$isComplete.filter { $0 }.sink { [weak self] _ in
             self?.preferences.recordCompletedSetup()
         }
+        haptics.observe(lockScreen: lockScreen, enrollment: enrollment)
         lockIndicator.observe(lockScreen)
         refresh()
         sessionMonitor.start()

@@ -1,7 +1,7 @@
 import Foundation
 
 public enum EnrollmentError: Error, LocalizedError {
-    case quality, pose, lighting, incomplete, incompatible, expired, corrupt, busy, faceLimit
+    case quality, pose, lighting, incomplete, incompatible, expired, corrupt, busy, faceLimit, noEnabledFaces, invalidName
     public var errorDescription: String? {
         switch self {
         case .quality: "Use even light, hold still, and keep one unobstructed face closer to the camera."
@@ -12,6 +12,8 @@ public enum EnrollmentError: Error, LocalizedError {
         case .expired: "The biometric session expired or was canceled. Authorize again."
         case .corrupt: "The encrypted enrollment could not be validated. No template was made available."
         case .busy: "An enrollment operation is already running."
+        case .noEnabledFaces: "Enable at least one face in Settings → Faces."
+        case .invalidName: "Use a face name of 1–40 characters, without control characters."
         case .faceLimit: "You can save up to three faces. Register again to replace your saved faces."
         }
     }
@@ -107,39 +109,82 @@ public struct EnrollmentMetrics: Codable, Sendable {
 
 /// A complete, validated template. Printable forms deliberately exclude all descriptors.
 public struct EnrollmentTemplate: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
-    public enum Format: Int, Sendable { case legacySevenViews = 1, continuousVideo = 2, multipleFaces = 3 }
+    public enum Format: Int, Sendable { case legacySevenViews = 1, continuousVideo = 2, multipleFaces = 3, managedFaces = 4 }
     public let format: Format
     public let modelIdentifier: String
     public let embeddings: [FaceEmbedding]
     public let additionalFaces: [[FaceEmbedding]]
+    public let faceNames: [String]
+    public let faceEnabled: [Bool]
     public static let maximumFaces = 3
     public var faces: [[FaceEmbedding]] { [embeddings] + additionalFaces }
-    public var supportsComparison: Bool { format == .continuousVideo || format == .multipleFaces }
-    public var description: String { "EnrollmentTemplate(samples: \(embeddings.count), biometric data: redacted)" }
+    public var supportsComparison: Bool { format != .legacySevenViews }
+    public var hasEnabledFaces: Bool { faceEnabled.contains(true) }
+    public var description: String { "EnrollmentTemplate(biometric data and names: redacted)" }
     public var debugDescription: String { description }
 
     public init(embeddings: [FaceEmbedding], modelIdentifier: String, format: Format = .continuousVideo,
-                additionalFaces: [[FaceEmbedding]] = []) throws {
+                additionalFaces: [[FaceEmbedding]] = [], faceNames: [String]? = nil, faceEnabled: [Bool]? = nil) throws {
         let requiredCount = format == .legacySevenViews ? 7 : VideoEnrollmentCollector.requiredSamples
         guard additionalFaces.count < Self.maximumFaces else { throw EnrollmentError.faceLimit }
-        guard (format == .multipleFaces) == !additionalFaces.isEmpty else { throw EnrollmentError.incompatible }
-        guard additionalFaces.allSatisfy({ $0.count == requiredCount }) else { throw EnrollmentError.incomplete }
-        guard embeddings.count == requiredCount else { throw EnrollmentError.incomplete }
+        if format != .managedFaces {
+            guard faceNames == nil, faceEnabled == nil else { throw EnrollmentError.incompatible }
+            guard (format == .multipleFaces) == !additionalFaces.isEmpty else { throw EnrollmentError.incompatible }
+        }
+        guard additionalFaces.allSatisfy({ $0.count == requiredCount }), embeddings.count == requiredCount else { throw EnrollmentError.incomplete }
         guard !modelIdentifier.isEmpty, ([embeddings] + additionalFaces).joined().allSatisfy({ $0.modelIdentifier == modelIdentifier }) else {
             throw EnrollmentError.incompatible
         }
-        self.embeddings = embeddings
-        self.modelIdentifier = modelIdentifier
-        self.format = format
-        self.additionalFaces = additionalFaces
+        let count = 1 + additionalFaces.count
+        let names = faceNames ?? (0..<count).map { $0 == 0 ? "My face" : "Face \($0 + 1)" }
+        let enabled = faceEnabled ?? Array(repeating: true, count: count)
+        guard names.count == count, enabled.count == count else { throw EnrollmentError.corrupt }
+        self.faceNames = try names.map(Self.validateName)
+        self.faceEnabled = enabled
+        self.embeddings = embeddings; self.modelIdentifier = modelIdentifier
+        self.format = format; self.additionalFaces = additionalFaces
+    }
+
+    public static func validateName(_ name: String) throws -> String {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 40, name.utf8.count <= 320,
+              !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { throw EnrollmentError.invalidName }
+        return name
     }
 
     public func adding(_ face: EnrollmentTemplate) throws -> EnrollmentTemplate {
-        guard supportsComparison, face.format == .continuousVideo,
+        guard supportsComparison, face.supportsComparison, face.faces.count == 1,
               face.modelIdentifier == modelIdentifier else { throw EnrollmentError.incompatible }
         guard faces.count < Self.maximumFaces else { throw EnrollmentError.faceLimit }
-        return try EnrollmentTemplate(embeddings: embeddings, modelIdentifier: modelIdentifier,
-                                      format: .multipleFaces, additionalFaces: additionalFaces + [face.embeddings])
+        return try rebuilt(faces: faces + [face.embeddings], names: faceNames + face.faceNames, enabled: faceEnabled + face.faceEnabled)
+    }
+
+    public func editingFace(at index: Int, name: String? = nil, enabled: Bool? = nil) throws -> EnrollmentTemplate {
+        guard supportsComparison, faces.indices.contains(index) else { throw EnrollmentError.incompatible }
+        var names = faceNames, states = faceEnabled
+        if let name { names[index] = try Self.validateName(name) }
+        if let enabled { states[index] = enabled }
+        return try rebuilt(faces: faces, names: names, enabled: states)
+    }
+
+    public func replacingFace(at index: Int, with face: EnrollmentTemplate) throws -> EnrollmentTemplate {
+        guard supportsComparison, faces.indices.contains(index), face.faces.count == 1,
+              face.supportsComparison, face.modelIdentifier == modelIdentifier else { throw EnrollmentError.incompatible }
+        var updated = faces, names = faceNames
+        updated[index] = face.embeddings; names[index] = face.faceNames[0]
+        return try rebuilt(faces: updated, names: names, enabled: faceEnabled)
+    }
+
+    public func removingFace(at index: Int) throws -> EnrollmentTemplate {
+        guard supportsComparison, faces.indices.contains(index), faces.count > 1 else { throw EnrollmentError.incomplete }
+        var updated = faces, names = faceNames, states = faceEnabled
+        updated.remove(at: index); names.remove(at: index); states.remove(at: index)
+        return try rebuilt(faces: updated, names: names, enabled: states)
+    }
+
+    private func rebuilt(faces: [[FaceEmbedding]], names: [String], enabled: [Bool]) throws -> EnrollmentTemplate {
+        try EnrollmentTemplate(embeddings: faces[0], modelIdentifier: modelIdentifier, format: .managedFaces,
+                               additionalFaces: Array(faces.dropFirst()), faceNames: names, faceEnabled: enabled)
     }
 }
 

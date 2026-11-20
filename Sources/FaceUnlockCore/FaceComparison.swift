@@ -55,6 +55,7 @@ public struct FaceComparisonWindow: CustomStringConvertible, CustomDebugStringCo
 
     public init(template: EnrollmentTemplate, mode: FaceComparisonMode = .standard) throws {
         guard template.supportsComparison else { throw EnrollmentError.incompatible }
+        guard template.hasEnabledFaces else { throw EnrollmentError.noEnabledFaces }
         self.template = template; self.mode = mode
     }
 
@@ -77,7 +78,7 @@ public struct FaceComparisonWindow: CustomStringConvertible, CustomDebugStringCo
 
     private func bestFace(for embedding: FaceEmbedding) throws -> (index: Int, score: Double) {
         guard embedding.modelIdentifier == template.modelIdentifier else { throw EnrollmentError.incompatible }
-        let scores = try template.faces.enumerated().map { index, face in
+        let scores = try template.faces.enumerated().filter { template.faceEnabled[$0.offset] }.map { index, face in
             let nearest = try face.map { try embedding.cosineSimilarity(to: $0) }.sorted(by: >).prefix(3)
             return (index: index, score: nearest.reduce(0, +) / 3)
         }

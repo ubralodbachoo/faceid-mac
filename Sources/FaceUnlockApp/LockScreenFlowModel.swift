@@ -207,6 +207,7 @@ final class LockScreenFlowModel: ObservableObject {
                 try await vault.authorizeReading()
                 try Task.checkCancellation(); try await waitForDesktop()
                 let template = try vault.templateForVerification()
+                guard template.hasEnabledFaces else { throw EnrollmentError.noEnabledFaces }
                 try await services.prepare()
                 try Task.checkCancellation(); try await waitForDesktop()
                 if experimentalUnlock {

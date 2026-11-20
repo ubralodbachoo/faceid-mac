@@ -20,8 +20,12 @@ public final class EnrollmentVault: ObservableObject {
     private var deadline: Double?
     private var enrollmentSession = false
     private var addingFace = false
+    private var replacingFace: Int?
     private var authorizedBlobDigest: Data?
     @Published public private(set) var faceCount: Int?
+    public private(set) var registeredNames: [String] = []
+    public private(set) var registeredEnabled: [Bool] = []
+    public private(set) var metadataRevision: Data?
     private var generation = UUID()
     private var busy = false
     private var expiryTask: Task<Void, Never>?
@@ -56,15 +60,18 @@ public final class EnrollmentVault: ObservableObject {
     public func refreshPresence() { hasEnrollment = (try? blobs.read()) != nil }
 
     /// Fresh OS authentication for each enrollment/replacement; expires including sleep.
-    public func beginEnrollment(addingFace: Bool = false) async throws {
+    public func beginEnrollment(addingFace: Bool = false, replacingFace: Int? = nil, expectedRevision: Data? = nil) async throws {
         try await authorize(enrolling: true)
         do {
-            if addingFace {
+            guard !(addingFace && replacingFace != nil) else { throw EnrollmentError.incompatible }
+            if let expectedRevision, authorizedBlobDigest != expectedRevision { throw EnrollmentError.expired }
+            if addingFace || replacingFace != nil {
                 guard let key, let blob = try blobs.read() else { throw EnrollmentError.incomplete }
                 let existing = try decode(blob, key: key, requireCurrentModel: true)
-                guard existing.faces.count < EnrollmentTemplate.maximumFaces else { throw EnrollmentError.faceLimit }
+                if addingFace && existing.faces.count >= EnrollmentTemplate.maximumFaces { throw EnrollmentError.faceLimit }
+                if let replacingFace, !existing.faces.indices.contains(replacingFace) { throw EnrollmentError.incompatible }
             }
-            self.addingFace = addingFace
+            self.addingFace = addingFace; self.replacingFace = replacingFace
         } catch { lock(); throw error }
     }
 
@@ -75,15 +82,15 @@ public final class EnrollmentVault: ObservableObject {
         catch { lock(); throw error }
     }
 
-    private func authorize(enrolling: Bool) async throws {
+    private func authorize(enrolling: Bool, reason: String? = nil) async throws {
         guard !busy else { throw EnrollmentError.busy }
         lock()
         let token = generation
         busy = true
         defer { busy = false }
-        try await authenticator.authenticate(reason: enrolling
+        try await authenticator.authenticate(reason: reason ?? (enrolling
             ? "Enroll or replace your local Face Unlock face template (three-minute capture session)"
-            : "Read your encrypted Face Unlock template for a 90-second diagnostic session")
+            : "Read your encrypted Face Unlock faces"))
         try Task.checkCancellation()
         guard generation == token else { throw EnrollmentError.expired }
         let blob = try blobs.read()
@@ -120,31 +127,67 @@ public final class EnrollmentVault: ObservableObject {
     }
 
     /// Atomic ciphertext commit. Cancellation, expiry and incomplete drafts preserve the old file.
-    public func save(_ template: EnrollmentTemplate) throws {
+    public func save(_ template: EnrollmentTemplate, named name: String? = nil) throws {
         try Task.checkCancellation()
         guard let key, sessionIsValid, enrollmentSession else { lock(); throw EnrollmentError.expired }
         guard template.modelIdentifier == modelIdentifier, template.format == .continuousVideo else { throw EnrollmentError.incompatible }
-        var savedTemplate = template
-        if addingFace {
+        let captured = try name.map { try template.editingFace(at: 0, name: $0) } ?? template
+        var saved = captured
+        if addingFace || replacingFace != nil {
             guard let blob = try blobs.read(), Data(SHA256.hash(data: blob)) == authorizedBlobDigest else {
                 lock(); throw EnrollmentError.expired
             }
-            savedTemplate = try decode(blob, key: key, requireCurrentModel: true).adding(template)
+            let existing = try decode(blob, key: key, requireCurrentModel: true)
+            if let replacingFace { saved = try existing.replacingFace(at: replacingFace, with: captured) }
+            else { saved = try existing.adding(captured) }
         }
-        let payload = Payload(schema: savedTemplate.format.rawValue, userID: userID, modelIdentifier: modelIdentifier,
+        try commit(saved, key: key)
+    }
+
+    /// Metadata edits are freshly authenticated and bound to the collection shown in the UI.
+    public func updateFace(at index: Int, name: String? = nil, enabled: Bool? = nil,
+                           remove: Bool = false, expectedRevision: Data) async throws {
+        if let name { _ = try EnrollmentTemplate.validateName(name) }
+        try await authorize(enrolling: false, reason: "Change your saved Face Unlock face settings")
+        defer { lock() }
+        try Task.checkCancellation()
+        guard let key, sessionIsValid, let blob = try blobs.read(),
+              Data(SHA256.hash(data: blob)) == expectedRevision else { throw EnrollmentError.expired }
+        let existing = try decode(blob, key: key, requireCurrentModel: true)
+        guard existing.faces.indices.contains(index) else { throw EnrollmentError.incompatible }
+        if remove && existing.faces.count == 1 {
+            try keys.delete(); try blobs.delete()
+            hasEnrollment = false; faceCount = 0; registeredNames = []; registeredEnabled = []; metadataRevision = nil
+            NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+        } else {
+            let updated = try remove ? existing.removingFace(at: index) : existing.editingFace(at: index, name: name, enabled: enabled)
+            try commit(updated, key: key)
+        }
+    }
+
+    private func commit(_ template: EnrollmentTemplate, key: SymmetricKey) throws {
+        let payload = Payload(schema: template.format.rawValue, userID: userID, modelIdentifier: modelIdentifier,
                               pipelineIdentifier: VideoEnrollmentCollector.pipelineIdentifier,
                               policyIdentifier: VideoEnrollmentCollector.policyIdentifier,
-                              vectors: savedTemplate.embeddings.map(\.values),
-                              additionalVectors: savedTemplate.additionalFaces.isEmpty ? nil : savedTemplate.additionalFaces.map { $0.map(\.values) })
+                              vectors: template.embeddings.map(\.values),
+                              additionalVectors: template.additionalFaces.isEmpty ? nil : template.additionalFaces.map { $0.map(\.values) },
+                              faceNames: template.format == .managedFaces ? template.faceNames : nil,
+                              faceEnabled: template.format == .managedFaces ? template.faceEnabled : nil)
         var plaintext = try JSONEncoder().encode(payload)
         defer { plaintext.resetBytes(in: 0..<plaintext.count) }
         let sealed = try AES.GCM.seal(plaintext, using: key, authenticating: associatedData)
         guard let data = sealed.combined else { throw EnrollmentError.corrupt }
-        try blobs.write(Data("FUE1".utf8) + data)
+        let blob = Data("FUE1".utf8) + data
+        try blobs.write(blob)
+        publishMetadata(template, blob: blob)
         hasEnrollment = true
-        faceCount = savedTemplate.faces.count
         lock()
         NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+    }
+
+    private func publishMetadata(_ template: EnrollmentTemplate, blob: Data) {
+        faceCount = template.faces.count; registeredNames = template.faceNames; registeredEnabled = template.faceEnabled
+        metadataRevision = Data(SHA256.hash(data: blob))
     }
 
     public func templateForVerification() throws -> EnrollmentTemplate {
@@ -152,7 +195,7 @@ public final class EnrollmentVault: ObservableObject {
         do {
             guard let blob = try blobs.read() else { throw EnrollmentError.incomplete }
             let template = try decode(blob, key: key, requireCurrentModel: true)
-            faceCount = template.faces.count
+            publishMetadata(template, blob: blob)
             return template
         }
         catch { lock(); throw error }
@@ -170,16 +213,17 @@ public final class EnrollmentVault: ObservableObject {
             let payload = try JSONDecoder().decode(Payload.self, from: plaintext)
             guard let format = EnrollmentTemplate.Format(rawValue: payload.schema), payload.userID == userID else { throw EnrollmentError.corrupt }
             guard !requireCurrentModel || payload.modelIdentifier == modelIdentifier else { throw EnrollmentError.incompatible }
-            if format == .continuousVideo || format == .multipleFaces {
+            if format != .legacySevenViews {
                 guard payload.pipelineIdentifier == VideoEnrollmentCollector.pipelineIdentifier,
                       payload.policyIdentifier == VideoEnrollmentCollector.policyIdentifier else { throw EnrollmentError.incompatible }
             } else if requireCurrentModel { throw EnrollmentError.incompatible }
+            if format == .managedFaces && (payload.faceNames == nil || payload.faceEnabled == nil) { throw EnrollmentError.corrupt }
             return try EnrollmentTemplate(embeddings: payload.vectors.map {
                 try FaceEmbedding(raw: $0, modelIdentifier: payload.modelIdentifier)
             }, modelIdentifier: payload.modelIdentifier, format: format,
                additionalFaces: try (payload.additionalVectors ?? []).map { vectors in
                    try vectors.map { try FaceEmbedding(raw: $0, modelIdentifier: payload.modelIdentifier) }
-               })
+               }, faceNames: payload.faceNames, faceEnabled: payload.faceEnabled)
         } catch let error as EnrollmentError { throw error }
         catch { throw EnrollmentError.corrupt }
     }
@@ -195,15 +239,19 @@ public final class EnrollmentVault: ObservableObject {
         guard token == generation else { throw EnrollmentError.expired }
         try keys.delete()
         try blobs.delete()
-        faceCount = 0
+        faceCount = 0; registeredNames = []; registeredEnabled = []; metadataRevision = nil
         NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+    }
+
+    public func clearVisibleMetadata() {
+        registeredNames = []; registeredEnabled = []; metadataRevision = nil; faceCount = nil
     }
 
     public func lock() {
         generation = UUID()
         authenticator.cancel()
         expiryTask?.cancel(); expiryTask = nil
-        key = nil; deadline = nil; enrollmentSession = false; addingFace = false; authorizedBlobDigest = nil
+        key = nil; deadline = nil; enrollmentSession = false; addingFace = false; replacingFace = nil; authorizedBlobDigest = nil
     }
 
     deinit { expiryTask?.cancel() }
@@ -217,4 +265,6 @@ private struct Payload: Codable {
     let policyIdentifier: String?
     let vectors: [[Float]]
     let additionalVectors: [[[Float]]]?
+    let faceNames: [String]?
+    let faceEnabled: [Bool]?
 }
