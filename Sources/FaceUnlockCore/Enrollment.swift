@@ -1,7 +1,7 @@
 import Foundation
 
 public enum EnrollmentError: Error, LocalizedError {
-    case quality, pose, lighting, incomplete, incompatible, expired, corrupt, busy
+    case quality, pose, lighting, incomplete, incompatible, expired, corrupt, busy, faceLimit
     public var errorDescription: String? {
         switch self {
         case .quality: "Use even light, hold still, and keep one unobstructed face closer to the camera."
@@ -12,6 +12,7 @@ public enum EnrollmentError: Error, LocalizedError {
         case .expired: "The biometric session expired or was canceled. Authorize again."
         case .corrupt: "The encrypted enrollment could not be validated. No template was made available."
         case .busy: "An enrollment operation is already running."
+        case .faceLimit: "You can save up to three faces. Register again to replace your saved faces."
         }
     }
 }
@@ -106,22 +107,39 @@ public struct EnrollmentMetrics: Codable, Sendable {
 
 /// A complete, validated template. Printable forms deliberately exclude all descriptors.
 public struct EnrollmentTemplate: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
-    public enum Format: Int, Sendable { case legacySevenViews = 1, continuousVideo = 2 }
+    public enum Format: Int, Sendable { case legacySevenViews = 1, continuousVideo = 2, multipleFaces = 3 }
     public let format: Format
     public let modelIdentifier: String
     public let embeddings: [FaceEmbedding]
+    public let additionalFaces: [[FaceEmbedding]]
+    public static let maximumFaces = 3
+    public var faces: [[FaceEmbedding]] { [embeddings] + additionalFaces }
+    public var supportsComparison: Bool { format == .continuousVideo || format == .multipleFaces }
     public var description: String { "EnrollmentTemplate(samples: \(embeddings.count), biometric data: redacted)" }
     public var debugDescription: String { description }
 
-    public init(embeddings: [FaceEmbedding], modelIdentifier: String, format: Format = .continuousVideo) throws {
-        let requiredCount = format == .continuousVideo ? VideoEnrollmentCollector.requiredSamples : 7
+    public init(embeddings: [FaceEmbedding], modelIdentifier: String, format: Format = .continuousVideo,
+                additionalFaces: [[FaceEmbedding]] = []) throws {
+        let requiredCount = format == .legacySevenViews ? 7 : VideoEnrollmentCollector.requiredSamples
+        guard additionalFaces.count < Self.maximumFaces else { throw EnrollmentError.faceLimit }
+        guard (format == .multipleFaces) == !additionalFaces.isEmpty else { throw EnrollmentError.incompatible }
+        guard additionalFaces.allSatisfy({ $0.count == requiredCount }) else { throw EnrollmentError.incomplete }
         guard embeddings.count == requiredCount else { throw EnrollmentError.incomplete }
-        guard !modelIdentifier.isEmpty, embeddings.allSatisfy({ $0.modelIdentifier == modelIdentifier }) else {
+        guard !modelIdentifier.isEmpty, ([embeddings] + additionalFaces).joined().allSatisfy({ $0.modelIdentifier == modelIdentifier }) else {
             throw EnrollmentError.incompatible
         }
         self.embeddings = embeddings
         self.modelIdentifier = modelIdentifier
         self.format = format
+        self.additionalFaces = additionalFaces
+    }
+
+    public func adding(_ face: EnrollmentTemplate) throws -> EnrollmentTemplate {
+        guard supportsComparison, face.format == .continuousVideo,
+              face.modelIdentifier == modelIdentifier else { throw EnrollmentError.incompatible }
+        guard faces.count < Self.maximumFaces else { throw EnrollmentError.faceLimit }
+        return try EnrollmentTemplate(embeddings: embeddings, modelIdentifier: modelIdentifier,
+                                      format: .multipleFaces, additionalFaces: additionalFaces + [face.embeddings])
     }
 }
 

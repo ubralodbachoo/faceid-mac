@@ -17,7 +17,7 @@ enum EnrollmentPhase: Equatable {
 @MainActor
 final class EnrollmentModel: ObservableObject {
     @Published private(set) var phase: EnrollmentPhase = .idle
-    @Published private(set) var status = "Your camera stays off until you start setup."
+    @Published private(set) var status = "Your camera stays off until you start a scan."
     @Published private(set) var currentPose = EnrollmentPose.center
     @Published private(set) var completedPoses = 0
     @Published private(set) var holdProgress = 0.0
@@ -30,6 +30,8 @@ final class EnrollmentModel: ObservableObject {
     @Published private(set) var faceIsReady = false
     @Published private(set) var detectedFaceBounds: FaceBounds?
     @Published private(set) var secondsRemaining = 0
+    @Published private(set) var isAddingFace = false
+    @Published private(set) var savedFaceCount: Int?
     @Published private(set) var cameraSettingsNeeded = false
     private let vault: EnrollmentVault
     private let session: MacEnrollmentSession
@@ -67,6 +69,7 @@ final class EnrollmentModel: ObservableObject {
     func refresh() {
         vault.refreshPresence()
         hasEnrollment = vault.hasEnrollment
+        savedFaceCount = hasEnrollment ? vault.faceCount : 0
         if phase == .saved && !hasEnrollment { phase = .idle }
     }
 
@@ -78,8 +81,12 @@ final class EnrollmentModel: ObservableObject {
         try await session.waitForForeground()
     }
 
-    func start() {
-        guard !isBusy else { return }
+    func start() { start(addingFace: false) }
+    func startAddingFace() { start(addingFace: true) }
+
+    private func start(addingFace: Bool) {
+        guard !isBusy, !canSave else { return }
+        isAddingFace = addingFace
         resetPending()
         vault.lock()
         cancellationMessage = nil
@@ -90,7 +97,7 @@ final class EnrollmentModel: ObservableObject {
         operation = Task {
             do {
                 try await waitForForeground()
-                try await vault.beginEnrollment()
+                try await vault.beginEnrollment(addingFace: addingFace)
                 try Task.checkCancellation()
                 try await waitForForeground()
                 secondsRemaining = vault.secondsRemaining
@@ -282,7 +289,7 @@ final class EnrollmentModel: ObservableObject {
             try checkSession()
             try vault.save(pendingTemplate)
             phase = .saved
-            status = "Your face template is saved on this Mac."
+            status = isAddingFace ? "Face added. Your existing faces are still saved." : "Your face is saved on this Mac."
         } catch EnrollmentSessionError.foregroundRequired {
             status = "Bring this window to the front, then choose Save face."
             return

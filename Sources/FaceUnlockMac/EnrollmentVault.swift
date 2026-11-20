@@ -19,6 +19,9 @@ public final class EnrollmentVault: ObservableObject {
     private var key: SymmetricKey?
     private var deadline: Double?
     private var enrollmentSession = false
+    private var addingFace = false
+    private var authorizedBlobDigest: Data?
+    @Published public private(set) var faceCount: Int?
     private var generation = UUID()
     private var busy = false
     private var expiryTask: Task<Void, Never>?
@@ -53,8 +56,16 @@ public final class EnrollmentVault: ObservableObject {
     public func refreshPresence() { hasEnrollment = (try? blobs.read()) != nil }
 
     /// Fresh OS authentication for each enrollment/replacement; expires including sleep.
-    public func beginEnrollment() async throws {
+    public func beginEnrollment(addingFace: Bool = false) async throws {
         try await authorize(enrolling: true)
+        do {
+            if addingFace {
+                guard let key, let blob = try blobs.read() else { throw EnrollmentError.incomplete }
+                let existing = try decode(blob, key: key, requireCurrentModel: true)
+                guard existing.faces.count < EnrollmentTemplate.maximumFaces else { throw EnrollmentError.faceLimit }
+            }
+            self.addingFace = addingFace
+        } catch { lock(); throw error }
     }
 
     /// Explicit read lease for a later verifier. This cannot authorize password access or input.
@@ -90,7 +101,10 @@ public final class EnrollmentVault: ObservableObject {
         guard material.count == 32 else { throw VaultError.invalidKey }
         let loadedKey = SymmetricKey(data: material)
         // Authenticate existing data before replacement, but permit deliberate model upgrades.
-        if let blob { _ = try decode(blob, key: loadedKey, requireCurrentModel: !enrolling) }
+        if let blob {
+            faceCount = try decode(blob, key: loadedKey, requireCurrentModel: !enrolling).faces.count
+            authorizedBlobDigest = Data(SHA256.hash(data: blob))
+        } else { faceCount = 0; authorizedBlobDigest = nil }
         let time = now()
         guard time.isFinite, time >= 0 else { throw EnrollmentError.expired }
         key = loadedKey
@@ -110,16 +124,25 @@ public final class EnrollmentVault: ObservableObject {
         try Task.checkCancellation()
         guard let key, sessionIsValid, enrollmentSession else { lock(); throw EnrollmentError.expired }
         guard template.modelIdentifier == modelIdentifier, template.format == .continuousVideo else { throw EnrollmentError.incompatible }
-        let payload = Payload(schema: 2, userID: userID, modelIdentifier: modelIdentifier,
+        var savedTemplate = template
+        if addingFace {
+            guard let blob = try blobs.read(), Data(SHA256.hash(data: blob)) == authorizedBlobDigest else {
+                lock(); throw EnrollmentError.expired
+            }
+            savedTemplate = try decode(blob, key: key, requireCurrentModel: true).adding(template)
+        }
+        let payload = Payload(schema: savedTemplate.format.rawValue, userID: userID, modelIdentifier: modelIdentifier,
                               pipelineIdentifier: VideoEnrollmentCollector.pipelineIdentifier,
                               policyIdentifier: VideoEnrollmentCollector.policyIdentifier,
-                              vectors: template.embeddings.map(\.values))
+                              vectors: savedTemplate.embeddings.map(\.values),
+                              additionalVectors: savedTemplate.additionalFaces.isEmpty ? nil : savedTemplate.additionalFaces.map { $0.map(\.values) })
         var plaintext = try JSONEncoder().encode(payload)
         defer { plaintext.resetBytes(in: 0..<plaintext.count) }
         let sealed = try AES.GCM.seal(plaintext, using: key, authenticating: associatedData)
         guard let data = sealed.combined else { throw EnrollmentError.corrupt }
         try blobs.write(Data("FUE1".utf8) + data)
         hasEnrollment = true
+        faceCount = savedTemplate.faces.count
         lock()
         NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
     }
@@ -128,13 +151,15 @@ public final class EnrollmentVault: ObservableObject {
         guard let key, sessionIsValid, !enrollmentSession else { lock(); throw EnrollmentError.expired }
         do {
             guard let blob = try blobs.read() else { throw EnrollmentError.incomplete }
-            return try decode(blob, key: key, requireCurrentModel: true)
+            let template = try decode(blob, key: key, requireCurrentModel: true)
+            faceCount = template.faces.count
+            return template
         }
         catch { lock(); throw error }
     }
 
     private func decode(_ blob: Data, key: SymmetricKey, requireCurrentModel: Bool) throws -> EnrollmentTemplate {
-        guard blob.count <= 250_000, blob.starts(with: Data("FUE1".utf8)) else { throw EnrollmentError.corrupt }
+        guard blob.count <= 750_000, blob.starts(with: Data("FUE1".utf8)) else { throw EnrollmentError.corrupt }
         var plaintext: Data
         do {
             plaintext = try AES.GCM.open(AES.GCM.SealedBox(combined: blob.dropFirst(4)),
@@ -145,13 +170,16 @@ public final class EnrollmentVault: ObservableObject {
             let payload = try JSONDecoder().decode(Payload.self, from: plaintext)
             guard let format = EnrollmentTemplate.Format(rawValue: payload.schema), payload.userID == userID else { throw EnrollmentError.corrupt }
             guard !requireCurrentModel || payload.modelIdentifier == modelIdentifier else { throw EnrollmentError.incompatible }
-            if format == .continuousVideo {
+            if format == .continuousVideo || format == .multipleFaces {
                 guard payload.pipelineIdentifier == VideoEnrollmentCollector.pipelineIdentifier,
                       payload.policyIdentifier == VideoEnrollmentCollector.policyIdentifier else { throw EnrollmentError.incompatible }
             } else if requireCurrentModel { throw EnrollmentError.incompatible }
             return try EnrollmentTemplate(embeddings: payload.vectors.map {
                 try FaceEmbedding(raw: $0, modelIdentifier: payload.modelIdentifier)
-            }, modelIdentifier: payload.modelIdentifier, format: format)
+            }, modelIdentifier: payload.modelIdentifier, format: format,
+               additionalFaces: try (payload.additionalVectors ?? []).map { vectors in
+                   try vectors.map { try FaceEmbedding(raw: $0, modelIdentifier: payload.modelIdentifier) }
+               })
         } catch let error as EnrollmentError { throw error }
         catch { throw EnrollmentError.corrupt }
     }
@@ -167,6 +195,7 @@ public final class EnrollmentVault: ObservableObject {
         guard token == generation else { throw EnrollmentError.expired }
         try keys.delete()
         try blobs.delete()
+        faceCount = 0
         NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
     }
 
@@ -174,7 +203,7 @@ public final class EnrollmentVault: ObservableObject {
         generation = UUID()
         authenticator.cancel()
         expiryTask?.cancel(); expiryTask = nil
-        key = nil; deadline = nil; enrollmentSession = false
+        key = nil; deadline = nil; enrollmentSession = false; addingFace = false; authorizedBlobDigest = nil
     }
 
     deinit { expiryTask?.cancel() }
@@ -187,4 +216,5 @@ private struct Payload: Codable {
     let pipelineIdentifier: String?
     let policyIdentifier: String?
     let vectors: [[Float]]
+    let additionalVectors: [[[Float]]]?
 }

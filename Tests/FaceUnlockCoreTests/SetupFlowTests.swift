@@ -144,6 +144,54 @@ final class SetupFlowTests: XCTestCase {
     }
 
     @MainActor
+    func testReplayStopsUnlockAndClearsConsentWithoutDeletingSavedData() async throws {
+        let fixture = SetupFixture()
+        fixture.reachFinish(); fixture.model.acknowledgesPhotoRisk = true
+        fixture.model.finish()
+        try await idle(fixture.model)
+        fixture.model.restart()
+        XCTAssertFalse(fixture.enabled)
+        XCTAssertFalse(fixture.model.isComplete)
+        XCTAssertFalse(fixture.model.acknowledgesPhotoRisk)
+        XCTAssertEqual(fixture.model.step, .permissions)
+        XCTAssertTrue(fixture.face)
+        XCTAssertTrue(fixture.passwordSaved)
+        XCTAssertEqual(fixture.saves, 0)
+    }
+
+    @MainActor
+    func testReturningUserReauthorizesWithoutSavingPasswordAgain() async throws {
+        let fixture = SetupFixture()
+        fixture.permissions = true; fixture.face = true; fixture.passwordSaved = true
+        fixture.model.enableSavedSetup()
+        try await idle(fixture.model)
+        XCTAssertTrue(fixture.enabled)
+        XCTAssertEqual(fixture.enables, 1)
+        XCTAssertEqual(fixture.saves, 0)
+        fixture.model.turnOff()
+        fixture.enableFails = true
+        fixture.model.enableSavedSetup()
+        try await idle(fixture.model)
+        XCTAssertFalse(fixture.enabled)
+        XCTAssertFalse(fixture.model.isComplete)
+    }
+
+    @MainActor
+    func testReturningUserCannotBypassMissingRequirements() {
+        let fixture = SetupFixture()
+        fixture.model.enableSavedSetup()
+        XCTAssertEqual(fixture.model.step, .permissions)
+        XCTAssertEqual(fixture.enables, 0)
+        fixture.permissions = true
+        fixture.model.enableSavedSetup()
+        XCTAssertEqual(fixture.model.step, .face)
+        fixture.face = true
+        fixture.model.enableSavedSetup()
+        XCTAssertEqual(fixture.model.step, .password)
+        XCTAssertEqual(fixture.enables, 0)
+    }
+
+    @MainActor
     func testCanceledSetupRejectsLateAuthorization() async throws {
         let fixture = SetupFixture()
         fixture.reachFinish(); fixture.model.acknowledgesPhotoRisk = true

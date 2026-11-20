@@ -367,4 +367,52 @@ final class EnrollmentTests: XCTestCase {
             XCTAssertFalse(vault.sessionIsValid)
         }
     }
+    @MainActor
+    func testAddingFacePreservesExistingTemplatesAndReloadsEncryptedCollection() async throws {
+        let keys = EnrollmentKeys(), blobs = EnrollmentBlobs(), auth = EnrollmentAuth()
+        let vault = EnrollmentVault(keys: keys, blobs: blobs, authenticator: auth, modelIdentifier: enrollmentModelID)
+        let first = try template(1), second = try template(50)
+        try await vault.beginEnrollment(); try vault.save(first)
+        try await vault.beginEnrollment(addingFace: true); try vault.save(second)
+        let reopened = EnrollmentVault(keys: keys, blobs: blobs, authenticator: auth, modelIdentifier: enrollmentModelID)
+        try await reopened.authorizeReading()
+        let saved = try reopened.templateForVerification()
+        XCTAssertEqual(saved.format, .multipleFaces)
+        XCTAssertEqual(saved.faces.count, 2)
+        XCTAssertEqual(saved.embeddings.first?.values, first.embeddings.first?.values)
+        XCTAssertEqual(saved.additionalFaces.first?.first?.values, second.embeddings.first?.values)
+        XCTAssertEqual(reopened.faceCount, 2)
+    }
+
+    @MainActor
+    func testAddCancellationFailureConcurrentChangeAndLimitPreserveSavedFaces() async throws {
+        let keys = EnrollmentKeys(), blobs = EnrollmentBlobs(), auth = EnrollmentAuth()
+        let vault = EnrollmentVault(keys: keys, blobs: blobs, authenticator: auth, modelIdentifier: enrollmentModelID)
+        try await vault.beginEnrollment(); try vault.save(template())
+        let firstBlob = blobs.value
+        try await vault.beginEnrollment(addingFace: true); vault.lock()
+        XCTAssertThrowsError(try vault.save(template(2)))
+        XCTAssertEqual(blobs.value, firstBlob)
+        try await vault.beginEnrollment(addingFace: true)
+        blobs.failWrite = true
+        XCTAssertThrowsError(try vault.save(template(2)))
+        XCTAssertEqual(blobs.value, firstBlob)
+        blobs.failWrite = false; vault.lock()
+        try await vault.beginEnrollment(addingFace: true)
+        blobs.value = nil
+        XCTAssertThrowsError(try vault.save(template(2)))
+        XCTAssertNil(blobs.value, "A removed registration must never be resurrected by a late add")
+        blobs.value = firstBlob
+        for seed: Float in [2, 3] {
+            try await vault.beginEnrollment(addingFace: true); try vault.save(template(seed))
+        }
+        let fullBlob = blobs.value
+        do { try await vault.beginEnrollment(addingFace: true); XCTFail("Fourth face must be rejected before capture") } catch {}
+        XCTAssertFalse(vault.sessionIsValid)
+        XCTAssertEqual(blobs.value, fullBlob)
+        try await vault.beginEnrollment(); try vault.save(template(4))
+        try await vault.authorizeReading()
+        XCTAssertEqual(try vault.templateForVerification().faces.count, 1, "Register again replaces all faces")
+    }
+
 }

@@ -94,6 +94,22 @@ final class SetupFlowModel: ObservableObject {
         }
     }
 
+    /// Replays the presentation without deleting the saved face or password.
+    func restart(at step: SetupStep = .permissions) {
+        guard !isBusy else { return }
+        services.disableUnlock()
+        self.step = step
+        status = ""; isComplete = false; acknowledgesPhotoRisk = false
+    }
+
+    /// Returning users authorize a new session without repeating enrollment.
+    func enableSavedSetup() {
+        guard !isBusy else { return }
+        step = .finish
+        acknowledgesPhotoRisk = true
+        finish()
+    }
+
     func back() {
         guard !isBusy, !isComplete, let previous = SetupStep(rawValue: step.rawValue - 1) else { return }
         step = previous; status = ""

@@ -186,4 +186,42 @@ final class FaceComparisonTests: XCTestCase {
         }
         XCTAssertEqual(try window.observe(embedding(0.8), metrics: metrics(), at: 2.2)?.outcome, .similar)
     }
+    func testEachRegisteredFaceCanMatchWithoutPoolingItsVotesWithAnotherFace() throws {
+        let first = try template()
+        let second = try template(Array(repeating: embedding(0), count: 18))
+        let combined = try first.adding(second)
+        for probe in [try embedding(), try embedding(0)] {
+            var window = try FaceComparisonWindow(template: combined, mode: .shortEvaluation)
+            for index in 0..<6 { try window.observe(probe, metrics: metrics(), at: Double(index) * 0.15) }
+            XCTAssertEqual(window.result?.outcome, .similar)
+        }
+        var alternating = try FaceComparisonWindow(template: combined, mode: .shortEvaluation)
+        for index in 0..<12 {
+            try alternating.observe(embedding(index % 2 == 0 ? 1 : 0), metrics: metrics(), at: Double(index) * 0.15)
+            XCTAssertNil(alternating.result)
+        }
+        XCTAssertGreaterThan(alternating.continuityGeneration, 0, "Switching registered faces also resets liveness evidence")
+    }
+
+    func testTopThreeDescriptorsAreNeverPooledAcrossRegisteredFaces() throws {
+        let probe = try embedding()
+        let other = try embedding(0)
+        let sparse = try template([probe] + Array(repeating: other, count: 17))
+        let combined = try sparse.adding(sparse).adding(sparse)
+        let window = try FaceComparisonWindow(template: combined)
+        XCTAssertEqual(try window.similarity(for: probe), 1.0 / 3, accuracy: 1e-6)
+    }
+
+    func testAdditionalFacesMustBeCompleteCompatibleAndBounded() throws {
+        let first = try template()
+        XCTAssertThrowsError(try EnrollmentTemplate(embeddings: first.embeddings, modelIdentifier: "test",
+            format: .multipleFaces, additionalFaces: [Array(first.embeddings.prefix(2))]))
+        XCTAssertThrowsError(try EnrollmentTemplate(embeddings: first.embeddings, modelIdentifier: "test", format: .multipleFaces))
+        XCTAssertThrowsError(try EnrollmentTemplate(embeddings: first.embeddings, modelIdentifier: "test",
+            additionalFaces: [first.embeddings]))
+        let otherModel = try EnrollmentTemplate(embeddings: Array(repeating: embedding(1, model: "other"), count: 18), modelIdentifier: "other")
+        XCTAssertThrowsError(try first.adding(otherModel))
+        XCTAssertThrowsError(try first.adding(first).adding(first).adding(first))
+    }
+
 }

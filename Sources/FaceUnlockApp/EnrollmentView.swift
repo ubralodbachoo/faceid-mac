@@ -5,6 +5,10 @@ struct EnrollmentView: View {
     @ObservedObject var model: EnrollmentModel
     var onTestFace: () -> Void = {}
     var onContinue: (() -> Void)? = nil
+    var compact = false
+    var settingsMode = false
+    var beforeCapture: () -> Void = {}
+    @State private var confirmingReplacement = false
     @State private var confirmingRemoval = false
 
     var body: some View {
@@ -18,13 +22,14 @@ struct EnrollmentView: View {
             }
 
             CameraGuideView(model: model)
-                .frame(width: 320, height: 320)
+                .scaleEffect(compact ? 0.75 : 1)
+                .frame(width: compact ? 240 : 320, height: compact ? 240 : 320)
 
             if model.phase == .capturing || model.phase == .paused || model.phase == .review {
                 Text("\(model.completedPoses) of 9 angles ready")
                     .font(.caption).foregroundStyle(.secondary)
                     .accessibilityLabel("\(model.completedPoses) of 9 face angles captured")
-            } else if onContinue == nil {
+            } else if onContinue == nil && !settingsMode {
                 HStack(spacing: 12) {
                     Label("Confirm", systemImage: "lock")
                     Image(systemName: "chevron.right").font(.system(size: 9))
@@ -52,6 +57,7 @@ struct EnrollmentView: View {
                 Text(model.phase == .capturing || model.phase == .paused || model.phase == .review
                      ? "Switching apps pauses the camera. \(remainingTime) remaining to finish."
                     : onContinue != nil ? "Save your face, then continue to your Mac password."
+                    : settingsMode ? "Up to 3 faces. Add face keeps existing faces; Register again replaces them."
                     : "Try Face test to compare your face, or finish setup to enable face unlock.")
             }
             .font(.caption).foregroundStyle(.secondary)
@@ -60,7 +66,12 @@ struct EnrollmentView: View {
         .padding(.horizontal, 28)
         .padding(.vertical, 18)
         .frame(maxWidth: .infinity)
-        .confirmationDialog("Remove your saved face?", isPresented: $confirmingRemoval, titleVisibility: .visible) {
+        .confirmationDialog("Replace your saved faces?", isPresented: $confirmingReplacement, titleVisibility: .visible) {
+            Button("Register again", role: .destructive) { beforeCapture(); model.start() }
+        } message: {
+            Text("Saving a new scan replaces all registered faces. Use Add face to keep them.")
+        }
+        .confirmationDialog("Remove all saved faces?", isPresented: $confirmingRemoval, titleVisibility: .visible) {
             Button("Remove saved face", role: .destructive, action: model.delete)
         } message: {
             Text("macOS will ask you to confirm. You can register again later.")
@@ -81,7 +92,7 @@ struct EnrollmentView: View {
             }
         } else if model.phase == .paused {
             HStack(spacing: 12) {
-                Button("Cancel setup", action: model.cancel)
+                Button(settingsMode ? "Cancel scan" : "Cancel setup", action: model.cancel)
                 Button("Continue scan", action: model.resume)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
@@ -89,18 +100,29 @@ struct EnrollmentView: View {
         } else if model.isBusy {
             HStack(spacing: 12) {
                 if model.phase.isPreparing { ProgressView().controlSize(.small) }
-                Button("Cancel setup", action: model.cancel)
+                Button(settingsMode ? "Cancel scan" : "Cancel setup", action: model.cancel)
             }
-        } else if model.hasEnrollment && model.phase != .failed {
+        } else if model.hasEnrollment {
             VStack(spacing: 12) {
                 HStack(spacing: 12) {
-                    Button("Register again", action: model.start)
-                    Button(onContinue == nil ? "Test my face" : "Continue", action: onContinue ?? onTestFace)
-                        .buttonStyle(.borderedProminent)
+                    Button("Register again") { confirmingReplacement = true }
+                    if settingsMode {
+                        Button("Add face") { beforeCapture(); model.startAddingFace() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled((model.savedFaceCount ?? 0) >= 3)
+                    } else if let onContinue {
+                        Button("Continue", action: onContinue).buttonStyle(.borderedProminent)
+                    } else {
+                        #if !FACEUNLOCK_CUSTOMER
+                        Button("Test my face", action: onTestFace).buttonStyle(.borderedProminent)
+                        #endif
+                    }
                 }
                 DisclosureGroup("Manage saved face") {
+                    #if !FACEUNLOCK_CUSTOMER
                     Button("Check saved data", action: model.inspectSaved).buttonStyle(.link).font(.caption)
-                    Button("Remove saved face…", role: .destructive) { confirmingRemoval = true }
+                    #endif
+                    Button("Remove all saved faces…", role: .destructive) { confirmingRemoval = true }
                         .buttonStyle(.link).font(.caption)
                 }.fixedSize().font(.caption)
             }
@@ -109,13 +131,18 @@ struct EnrollmentView: View {
                 if model.cameraSettingsNeeded {
                     Button("Open camera settings", action: model.openCameraSettings)
                 }
-                Button(model.phase == .failed ? "Try again" : "Start face setup", action: model.start)
+                Button(model.phase == .failed ? "Try again" : settingsMode ? "Register face" : "Start face setup") {
+                    beforeCapture()
+                    if settingsMode && model.isAddingFace { model.startAddingFace() } else { model.start() }
+                }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("startFaceSetup")
+                #if !FACEUNLOCK_CUSTOMER
                 if model.hasEnrollment {
                     Button("Check saved data", action: model.inspectSaved)
                 }
+                #endif
             }
         }
     }
@@ -140,7 +167,7 @@ struct EnrollmentView: View {
         switch model.phase {
         case .idle:
             model.hasEnrollment
-                ? "Saved face setup was found on this Mac. Check it or register again."
+                ? "Your face is saved on this Mac. Add another appearance or register again."
                 : "A short, continuous scan. Gently follow the head-turn guide."
         case .authorizing: "Use the secure macOS dialog to authorize face setup."
         case .preparing: "The camera will open after everything is ready."

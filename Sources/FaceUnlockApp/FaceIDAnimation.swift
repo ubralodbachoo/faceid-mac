@@ -21,13 +21,14 @@ struct FaceIDAnimationFrame: View {
     let motionTime: TimeInterval
     let stageTime: TimeInterval
     var reduceMotion = false
+    var accent = FaceIDAccent.green.color
 
     var body: some View {
         Canvas { context, size in
             let side = min(size.width, size.height)
             let center = CGPoint(x: size.width / 2, y: size.height / 2)
             let radius = side * 0.345
-            let green = Color(red: 0.55, green: 0.96, blue: 0.48)
+            let green = accent
             context.opacity = reduceMotion || stage == .fallback ? 1 : smooth(motionTime / 0.2)
             if stage != .unlocked {
                 if stage == .fallback && !reduceMotion {

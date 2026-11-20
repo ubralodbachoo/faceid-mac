@@ -44,6 +44,7 @@ public struct FaceComparisonWindow: CustomStringConvertible, CustomDebugStringCo
     private var times: [Double] = []
     private var lastTime: Double?
     private var previousBounds: FaceBounds?
+    private var lastFaceIndex: Int?
     public private(set) var result: FaceComparisonResult?
     /// Changes whenever temporal identity continuity is discarded.
     public private(set) var continuityGeneration = 0
@@ -53,7 +54,7 @@ public struct FaceComparisonWindow: CustomStringConvertible, CustomDebugStringCo
     public var debugDescription: String { description }
 
     public init(template: EnrollmentTemplate, mode: FaceComparisonMode = .standard) throws {
-        guard template.format == .continuousVideo else { throw EnrollmentError.incompatible }
+        guard template.supportsComparison else { throw EnrollmentError.incompatible }
         self.template = template; self.mode = mode
     }
 
@@ -67,13 +68,20 @@ public struct FaceComparisonWindow: CustomStringConvertible, CustomDebugStringCo
     public mutating func interrupt() {
         continuityGeneration &+= 1
         scores.removeAll(keepingCapacity: true)
-        times.removeAll(keepingCapacity: true); lastTime = nil; previousBounds = nil; result = nil
+        times.removeAll(keepingCapacity: true); lastTime = nil; previousBounds = nil; lastFaceIndex = nil; result = nil
     }
 
     public func similarity(for embedding: FaceEmbedding) throws -> Double {
+        try bestFace(for: embedding).score
+    }
+
+    private func bestFace(for embedding: FaceEmbedding) throws -> (index: Int, score: Double) {
         guard embedding.modelIdentifier == template.modelIdentifier else { throw EnrollmentError.incompatible }
-        let nearest = try template.embeddings.map { try embedding.cosineSimilarity(to: $0) }.sorted(by: >).prefix(3)
-        return nearest.reduce(0, +) / 3
+        let scores = try template.faces.enumerated().map { index, face in
+            let nearest = try face.map { try embedding.cosineSimilarity(to: $0) }.sorted(by: >).prefix(3)
+            return (index: index, score: nearest.reduce(0, +) / 3)
+        }
+        return scores.max(by: { $0.score < $1.score })!
     }
 
     public static func adjustment(for metrics: EnrollmentMetrics) -> String? {
@@ -104,13 +112,20 @@ public struct FaceComparisonWindow: CustomStringConvertible, CustomDebugStringCo
         }
         if let previousBounds, let bounds = metrics.faceBounds,
            !FaceTrackContinuity.isContinuous(from: previousBounds, to: bounds) { interrupt() }
-        let score = try similarity(for: embedding)
+        let match = try bestFace(for: embedding)
+        let score = match.score
+        if score >= FaceComparisonPolicy.similarCutoff, let lastFaceIndex, match.index != lastFaceIndex {
+            // Each accepted window belongs to one registered face. Never combine votes
+            // or liveness evidence from different enrolled people/appearances.
+            interrupt()
+        }
         if let previousScore = scores.last,
            (previousScore >= FaceComparisonPolicy.similarCutoff && score < FaceComparisonPolicy.differentCutoff) ||
            (previousScore < FaceComparisonPolicy.differentCutoff && score >= FaceComparisonPolicy.similarCutoff) {
             // Do not carry the owner's votes into a different face's window.
             interrupt()
         }
+        if score >= FaceComparisonPolicy.similarCutoff { lastFaceIndex = match.index }
         lastTime = time; previousBounds = metrics.faceBounds
         scores.append(score); times.append(time); result = nil
         // A bounded rolling window must satisfy BOTH frame count and elapsed camera time.

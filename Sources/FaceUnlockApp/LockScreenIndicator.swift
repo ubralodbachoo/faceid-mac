@@ -56,6 +56,7 @@ final class LockScreenIndicator: NSObject {
     private var dismissal: Task<Void, Never>?
     private var previewSequence: Task<Void, Never>?
     private let presentation = LockScreenIndicatorPresentation()
+    private let preferences: AppPreferences
     private var observation: AnyCancellable?
     private var visiblePhase = LockScreenPhase.idle
     private var visibleCaption: String?
@@ -63,7 +64,8 @@ final class LockScreenIndicator: NSObject {
     private var visibilityRefresh: Task<Void, Never>?
     private(set) var diagnostics = LockScreenIndicatorDiagnostics()
 
-    override init() {
+    init(preferences: AppPreferences = AppPreferences()) {
+        self.preferences = preferences
         super.init()
         NotificationCenter.default.addObserver(self, selector: #selector(reposition),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
@@ -140,7 +142,7 @@ final class LockScreenIndicator: NSObject {
                             width: frame.width, failureCaption: caption)
         // Preserve one hosting view and animation clock across processing sub-stages.
         if !(panel.contentView is NSHostingView<LockScreenIndicatorView>) {
-            let hosting = NSHostingView(rootView: LockScreenIndicatorView(presentation: presentation))
+            let hosting = NSHostingView(rootView: LockScreenIndicatorView(presentation: presentation, preferences: preferences))
             // The view already reserves the physical notch height. AppKit's automatic
             // safe-area inset would add it a second time and separate the black surfaces.
             hosting.safeAreaRegions = []
@@ -242,6 +244,7 @@ final class LockScreenIndicatorPresentation: ObservableObject {
 
 private struct LockScreenIndicatorView: View {
     @ObservedObject var presentation: LockScreenIndicatorPresentation
+    @ObservedObject var preferences: AppPreferences
     private let surfaceBlack = Color(.sRGB, red: 0, green: 0, blue: 0, opacity: 1)
     @State private var expanded = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -272,7 +275,7 @@ private struct LockScreenIndicatorView: View {
                 let stage = FaceIDAnimationStage(phase)
                 let motionTime = (stage == .unlocked ? presentation.stageBeganAt : now) - presentation.startedAt
                 FaceIDAnimationFrame(stage: stage, motionTime: motionTime,
-                    stageTime: now - presentation.stageBeganAt, reduceMotion: reduceMotion)
+                    stageTime: now - presentation.stageBeganAt, reduceMotion: reduceMotion, accent: preferences.accent.color)
                     .frame(width: min(width * 0.67, 136), height: min(width * 0.67, 136))
                     .frame(width: width, height: height - safeTop)
             }

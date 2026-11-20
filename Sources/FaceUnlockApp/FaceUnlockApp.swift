@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import ApplicationServices
 import FaceUnlockCore
 import FaceUnlockMac
@@ -8,21 +9,27 @@ import FaceUnlockRecognition
 @MainActor
 struct FaceUnlockApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @StateObject private var model = AppModel(provider: MacReadinessProvider())
 
     var body: some Scene {
-        WindowGroup("Face Unlock") {
-            StatusView(model: model)
-                .onAppear { delegate.onTermination = { model.setup.cancel(); model.manualTest.cancel(); model.recognition.cancel(); model.enrollment.cancel(); model.faceTest.cancel(); model.lockScreen.disableAutomaticScanning(); model.lockScreen.cancel(); model.lockIndicator.hide() } }
+        MenuBarExtra {
+            Button("System Settings…") { delegate.openSettings() }
+                .keyboardShortcut(",")
+            Divider()
+            Button("Quit") { NSApp.terminate(nil) }.keyboardShortcut("q")
+        } label: {
+            FaceUnlockMenuLabel(model: delegate.model.lockScreen)
         }
-        .windowResizability(.contentSize)
+        .menuBarExtraStyle(.menu)
     }
 }
 
-@MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    var onTermination: (() -> Void)?
-    func applicationWillTerminate(_ notification: Notification) { onTermination?() }
+private struct FaceUnlockMenuLabel: View {
+    @ObservedObject var model: LockScreenFlowModel
+    var body: some View {
+        Image(systemName: "faceid")
+            .accessibilityLabel(model.automaticUnlockEnabled ? "Face Unlock, on" : "Face Unlock, off")
+            .help(model.automaticUnlockEnabled ? "Face Unlock is on" : "Face Unlock is off")
+    }
 }
 
 @MainActor
@@ -38,10 +45,14 @@ final class AppModel: ObservableObject {
     let faceTest = FaceTestModel()
     let lockScreen: LockScreenFlowModel
     let setup: SetupFlowModel
-    let lockIndicator = LockScreenIndicator()
+    let passwordSettings: PasswordSettingsModel
+    let preferences = AppPreferences()
+    let lockIndicator: LockScreenIndicator
+    private var setupObservation: AnyCancellable?
 
     init(provider: any ReadinessProviding) {
         self.provider = provider
+        lockIndicator = LockScreenIndicator(preferences: preferences)
         manualTest = ManualUnlockController(monitor: sessionMonitor, vault: vault)
         let scanner = LockScreenFaceScanner(mode: .shortEvaluation)
         let reports = LockScreenReportStore()
@@ -91,6 +102,16 @@ final class AppModel: ObservableObject {
                 try manualCredentials.save(password)
             }, enableUnlock: { consent in try await lockScreen.enableForSetup(acknowledgingPhotoRisk: consent) },
             disableUnlock: { lockScreen.disableAutomaticScanning() }))
+        passwordSettings = PasswordSettingsModel(services: PasswordSettingsServices(save: { password in
+            lockScreen.disableAutomaticScanning()
+            defer { manualCredentials.lock() }
+            try await manualCredentials.authorizeForPasswordSetup()
+            try Task.checkCancellation()
+            try manualCredentials.save(password)
+        }, cancel: { manualCredentials.lock() }))
+        setupObservation = setup.$isComplete.filter { $0 }.sink { [weak self] _ in
+            self?.preferences.recordCompletedSetup()
+        }
         lockIndicator.observe(lockScreen)
         refresh()
         sessionMonitor.start()
